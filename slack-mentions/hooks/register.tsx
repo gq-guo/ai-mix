@@ -51,6 +51,11 @@ let myId = ''
 let dir = ''
 let isLeader = false
 let isPolling = false
+// Which channel-wide mention this round searches for: one per round, so a round costs three searches.
+let broadcastRound = 0
+const BROADCAST_WORDS = ['<!here>', '<!channel>']
+// Slack's own markup for a channel-wide mention; a message that only spells `@channel` out has none.
+const BROADCAST_RE = /<!(here|channel|everyone)(\|[^>]*)?>/
 let failures = 0
 let lastSeen = ''
 
@@ -399,11 +404,13 @@ async function checkNow($: EngineInterface) {
     await resolveSlack($)
     const nowMs = await $.clock.now()
     const since = String(Math.floor(nowMs / 1000) - LOOKBACK_S)
-    const [mentions, dms] = await Promise.all([
+    const broadcastWord = BROADCAST_WORDS[broadcastRound++ % BROADCAST_WORDS.length] ?? '<!here>'
+    const [mentions, dms, broadcasts] = await Promise.all([
       search($, since, { keywords: [`<@${myId}>`] }),
       search($, since, { filters: 'is:dm', channel_types: 'im' }),
+      search($, since, { keywords: [broadcastWord], only_my_channels: true }),
     ])
-    const failed = [mentions, dms].find(r => r.isError)
+    const failed = [mentions, dms, broadcasts].find(r => r.isError)
     if (failed) throw new Error(resultText(failed))
     failures = 0
 
@@ -412,6 +419,11 @@ async function checkNow($: EngineInterface) {
     const byId = new Map(
       [...parseHits(resultText(mentions)), ...parseHits(resultText(dms))].map(h => [h.id, h] as const),
     )
+    // The search matches the word, not the markup: keep what really carries a channel-wide mention.
+    // A message that also names me directly stays a direct mention.
+    for (const h of parseHits(resultText(broadcasts))) {
+      if (!isDm(h) && BROADCAST_RE.test(h.text) && !byId.has(h.id)) byId.set(h.id, { ...h, isBroadcast: true })
+    }
     const newestFirst = [...byId.values()].sort((a, b) => Number(b.ts) - Number(a.ts))
 
     // A DM gets one card for its newest message, and none once that newest message is mine:
@@ -445,19 +457,30 @@ async function checkNow($: EngineInterface) {
         lastCheck: clockText(nowMs),
         lastOkAt: nowMs,
         items: [
-          ...fresh.map(h => ({ ...h, draft: '', status: 'drafting' as const, draftingSince: nowMs })),
+          // A channel-wide message waits for a press of 「拟稿」; the rest are drafted at once.
+          ...fresh.map(h =>
+            h.isBroadcast
+              ? { ...h, draft: '', status: 'new' as const }
+              : { ...h, draft: '', status: 'drafting' as const, draftingSince: nowMs },
+          ),
           ...s.items.filter(m => !replaced.includes(m) && m.status !== 'sent'),
         ].slice(0, MAX_ITEMS),
       }
     })
     await markHandled($, superseded)
-    if (fresh.length > 0) void $.ui.notify(`${fresh.length} 条新的 @ 或私聊，输入 /slack-mentions 查看`, { title: TITLE })
+    const wide = fresh.filter(h => h.isBroadcast).length
+    if (fresh.length > 0)
+      void $.ui
+        .notify(`${fresh.length} 条新消息${wide > 0 ? `（含 ${wide} 条全员）` : ''}，输入 /slack-mentions 查看`, {
+          title: TITLE,
+        })
+        .catch(() => {})
 
     // Drafts a session left unfinished (it closed mid-draft) are taken over here.
     const stuck = (await readJson($, 'shared', EMPTY)).items.filter(
       m => m.status === 'drafting' && !fresh.some(h => h.id === m.id) && nowMs - (m.draftingSince ?? 0) > STUCK_DRAFT_MS,
     )
-    for (const hit of fresh) await draftFor($, hit)
+    for (const hit of fresh) if (!hit.isBroadcast) await draftFor($, hit)
     for (const hit of stuck) await redraft($, hit)
   } catch (err) {
     // A refused call is often this session's permission check alone (auto mode's classifier
@@ -808,12 +831,12 @@ export const register: Register = on => {
         )}
         {open.length === 0 && (
           <Text size="footnote" color="subtle">
-            最近 24 小时没有待回复的 @ 或私聊
+            最近 24 小时没有待回复的 @、私聊或全员消息
           </Text>
         )}
         {open.map(m => {
           const parts = slackParts(m.text, TEXT_SHOWN)
-          const isEditable = m.status === 'ready' || m.status === 'error'
+          const isEditable = m.status === 'ready' || m.status === 'error' || m.status === 'new'
 
           return (
             <Box
@@ -830,6 +853,7 @@ export const register: Register = on => {
                   {m.from}
                 </Text>
                 <Text size="caption" color="subtle" wrap="truncate-start">
+                  {m.isBroadcast && <Text color="warning">全员 · </Text>}
                   {m.channelName} · {shortTime(m.time)}
                 </Text>
               </Box>
@@ -847,7 +871,7 @@ export const register: Register = on => {
                     key={`draft-${m.id}`}
                     rows={3}
                     value={m.draft}
-                    placeholder="回复内容"
+                    placeholder={m.status === 'new' ? '自己写，或点「拟稿」' : '回复内容'}
                     submitLabel="发送"
                     onInput={(v: string) => void patch($, m.id, { draft: v })}
                     onSubmit={(v: string) => {
@@ -875,7 +899,13 @@ export const register: Register = on => {
                       发送中…
                     </Text>
                   )}
-                  {isEditable && <Button key={`redo-${m.id}`} label="重新拟稿" onPress={() => void redraft($, m)} />}
+                  {isEditable && (
+                    <Button
+                      key={`redo-${m.id}`}
+                      label={m.status === 'new' ? '拟稿' : '重新拟稿'}
+                      onPress={() => void redraft($, m)}
+                    />
+                  )}
                   <Button key={`drop-${m.id}`} label="忽略" plain onPress={() => void dismiss($, m.id)} />
                 </Box>
                 {m.permalink && (

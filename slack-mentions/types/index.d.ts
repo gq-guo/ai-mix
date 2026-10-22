@@ -1,4 +1,5 @@
-export type MentionStatus = 'drafting' | 'ready' | 'sending' | 'sent' | 'error'
+// `new`: no draft yet and none started, which is how a channel-wide message arrives.
+export type MentionStatus = 'new' | 'drafting' | 'ready' | 'sending' | 'sent' | 'error'
 
 export type Person = { id: string; name: string }
 
@@ -7,6 +8,8 @@ export type Mention = {
   fromId?: string
   // Who took part in the conversation, for turning `@name` in a reply into a real mention.
   people?: Person[]
+  // Reached you through @here / @channel / @everyone rather than by name.
+  isBroadcast?: boolean
   channelId: string
   channelName: string
   from: string

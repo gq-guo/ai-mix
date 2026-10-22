@@ -132,3 +132,46 @@ test('a search through the connector lists the person and the channel it found',
   expect((await ui.find({ type: 'Button', key: 'target-C0DEMO0001' }))?.text).toContain('#help-demo')
   await ui.unmount()
 })
+
+// One search hit as the connector's detailed listing writes it.
+const hit = (n: number, channel: string, from: string, ts: string, text: string, isBot = false) =>
+  `### Result ${n} of 3\nChannel: #${channel} (ID: C0${channel.toUpperCase().replace(/-/g, '')})\n` +
+  `From: ${from} (ID: U0${from.toUpperCase().replace(/\W/g, '')})${isBot ? '  [BOT]' : ''}\n` +
+  `Time: 2026-10-22 09:44:16 CST\nMessage_ts: ${ts}\n` +
+  `Permalink: [link](https://example.slack.com/archives/C0X/p${ts.replace('.', '')})\nText: \n${text}\n\n---\n\n`
+
+test('a refresh keeps only real channel-wide mentions from people, undrafted and marked 全员', async ($, on) => {
+  const disk = new Map<string, string>()
+  on('fs.exists', (_, e) => ({ value: disk.has(e.path) }))
+  on('fs.read', (_, e) => ({ value: disk.get(e.path) ?? '' }))
+  on('fs.write', (_, e) => {
+    disk.set(e.path, e.text)
+
+    return { value: undefined }
+  })
+  on('clock.now', () => ({ value: 1792650000000 }))
+  on('tool.list', () => ({ value: [{ name: 'mcp__slack__slack_search_public_and_private', description: '', mcp: true }] }))
+  const broadcastListing =
+    hit(1, 'help-app', 'Alice', '1792633456.046949', '维护通知 <!channel> 下午三点停机半小时') +
+    hit(2, 'team-qa', 'Bob', '1792651394.075969', '写 @channel 这几个字会提醒大家吗') +
+    hit(3, 'announce', 'Deploy Bot', '1792650000.000001', '<!channel> 今天发版', true)
+  on('mcp.call', (_, e) => {
+    if (e.tool === 'slack_read_user_profile')
+      return { value: { content: [{ type: 'text', text: JSON.stringify({ result: 'User ID: U0ME000001\n' }) }] } } as never
+    const keywords = (e.args.keywords as string[] | undefined) ?? []
+    const listing = keywords.some(k => k.startsWith('<!')) ? broadcastListing : '## Messages (0 results)\n'
+
+    return { value: wrapped(listing) } as never
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'check' } as never)
+
+  const tag = await ui.find({ type: 'Text', text: /全员/ })
+  expect(tag?.text).toContain('help-app')
+  expect((await ui.find({ type: 'Button', key: 'redo-C0HELPAPP:1792633456.046949' }))?.props.label).toBe('拟稿')
+  expect(await ui.find({ type: 'Text', text: /正在拟稿/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'redo-C0TEAMQA:1792651394.075969' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'redo-C0ANNOUNCE:1792650000.000001' })).toBeUndefined()
+  await ui.unmount()
+})
