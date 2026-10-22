@@ -1,0 +1,6 @@
+{
+  "name": "slack-mentions",
+  "version": "0.1.1",
+  "description": "Side pane for Slack @-mentions and DMs: polls every 30s, drafts replies, sends on your click, and writes new messages to people or channels",
+  "types": "./types/index.d.ts"
+}

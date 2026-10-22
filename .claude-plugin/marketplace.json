@@ -1,0 +1,12 @@
+{
+  "name": "ai-mix",
+  "owner": { "name": "gq-guo" },
+  "description": "关于 ai 的杂七杂八：Claude Code 插件",
+  "plugins": [
+    {
+      "name": "slack-mentions",
+      "source": "./slack-mentions",
+      "description": "侧边面板处理 Slack 上 @ 你的消息和私聊：自动拟稿、点击发送、搜索人或频道发新消息"
+    }
+  ]
+}
