@@ -159,7 +159,12 @@ test('a refresh keeps only real channel-wide mentions from people, undrafted and
     if (e.tool === 'slack_read_user_profile')
       return { value: { content: [{ type: 'text', text: JSON.stringify({ result: 'User ID: U0ME000001\n' }) }] } } as never
     const keywords = (e.args.keywords as string[] | undefined) ?? []
-    const listing = keywords.some(k => k.startsWith('<!')) ? broadcastListing : '## Messages (0 results)\n'
+    const listing = keywords.some(k => k.startsWith('<!'))
+      ? broadcastListing
+      : keywords.includes('<@U0ME000001>')
+        ? hit(1, 'release', 'Release Bot', '1792651000.000002', '发布单 麻烦 <@U0ME000001> 点下 QA', true) +
+          hit(2, 'alerts', 'Test Bot', '1792651000.000003', '', true)
+        : '## Messages (0 results)\n'
 
     return { value: wrapped(listing) } as never
   })
@@ -173,5 +178,10 @@ test('a refresh keeps only real channel-wide mentions from people, undrafted and
   expect(await ui.find({ type: 'Text', text: /正在拟稿/ })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'redo-C0TEAMQA:1792651394.075969' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'redo-C0ANNOUNCE:1792650000.000001' })).toBeUndefined()
+
+  // A bot that names me with words shows, marked and undrafted; one with an empty message does not.
+  expect((await ui.find({ type: 'Text', text: /机器人/ }))?.text).toContain('release')
+  expect((await ui.find({ type: 'Button', key: 'redo-C0RELEASE:1792651000.000002' }))?.props.label).toBe('拟稿')
+  expect(await ui.find({ type: 'Button', key: 'redo-C0ALERTS:1792651000.000003' })).toBeUndefined()
   await ui.unmount()
 })

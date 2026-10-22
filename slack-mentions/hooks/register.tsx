@@ -56,6 +56,9 @@ let broadcastRound = 0
 const BROADCAST_WORDS = ['<!here>', '<!channel>']
 // Slack's own markup for a channel-wide mention; a message that only spells `@channel` out has none.
 const BROADCAST_RE = /<!(here|channel|everyone)(\|[^>]*)?>/
+
+// Messages that rarely want a reply are drafted only when asked.
+const waitsForDraft = (m: { isBroadcast?: boolean; isBot?: boolean }) => Boolean(m.isBroadcast || m.isBot)
 let failures = 0
 let lastSeen = ''
 
@@ -196,11 +199,12 @@ function parseHits(raw: string): Hit[] {
   const hits: Hit[] = []
   for (const block of listing.split(/^### Result /m).slice(1)) {
     const from = block.match(/^From: (.*?) \(ID: ([A-Z0-9]+)\)(.*)$/m)
-    if (!from || from[3]?.includes('[BOT]')) continue
+    if (!from) continue
     const channel = block.match(/^Channel: (.*?) \(ID: ([A-Z0-9]+)\)/m)
     const ts = block.match(/^Message_ts: ([\d.]+)/m)?.[1]
     const permalink = block.match(/^Permalink: \[link\]\((.*?)\)/m)?.[1] ?? ''
-    const text = (block.split(/^Text: ?/m)[1] ?? '').replace(/\n-{3,}\s*$/, '').trim()
+    // The text ends at the `---` rule; anything after it (the listing's paging note) is not the message's.
+    const text = (block.split(/^Text: ?/m)[1] ?? '').split(/^-{3,}\s*$/m)[0]?.trim() ?? ''
     if (!channel?.[2] || !ts || text === '') continue
     hits.push({
       id: `${channel[2]}:${ts}`,
@@ -214,6 +218,7 @@ function parseHits(raw: string): Hit[] {
       ts,
       threadTs: permalink.match(/thread_ts=([\d.]+)/)?.[1],
       isMine: from[2] === myId,
+      isBot: from[3]?.includes('[BOT]') || undefined,
       fromId: from[2],
     })
   }
@@ -406,7 +411,8 @@ async function checkNow($: EngineInterface) {
     const since = String(Math.floor(nowMs / 1000) - LOOKBACK_S)
     const broadcastWord = BROADCAST_WORDS[broadcastRound++ % BROADCAST_WORDS.length] ?? '<!here>'
     const [mentions, dms, broadcasts] = await Promise.all([
-      search($, since, { keywords: [`<@${myId}>`] }),
+      // A bot that names me is let in here alone; bots stay out of DMs and channel-wide messages.
+      search($, since, { keywords: [`<@${myId}>`], include_bots: true }),
       search($, since, { filters: 'is:dm', channel_types: 'im' }),
       search($, since, { keywords: [broadcastWord], only_my_channels: true }),
     ])
@@ -417,12 +423,15 @@ async function checkNow($: EngineInterface) {
     const handled = new Set(await readJson<string[]>($, 'handled', []))
     const shown = new Set((await readJson($, 'shared', EMPTY)).items.map(m => m.id))
     const byId = new Map(
-      [...parseHits(resultText(mentions)), ...parseHits(resultText(dms))].map(h => [h.id, h] as const),
+      [...parseHits(resultText(mentions)), ...parseHits(resultText(dms)).filter(h => !h.isBot)].map(
+        h => [h.id, h] as const,
+      ),
     )
     // The search matches the word, not the markup: keep what really carries a channel-wide mention.
     // A message that also names me directly stays a direct mention.
     for (const h of parseHits(resultText(broadcasts))) {
-      if (!isDm(h) && BROADCAST_RE.test(h.text) && !byId.has(h.id)) byId.set(h.id, { ...h, isBroadcast: true })
+      if (!isDm(h) && !h.isBot && BROADCAST_RE.test(h.text) && !byId.has(h.id))
+        byId.set(h.id, { ...h, isBroadcast: true })
     }
     const newestFirst = [...byId.values()].sort((a, b) => Number(b.ts) - Number(a.ts))
 
@@ -457,9 +466,9 @@ async function checkNow($: EngineInterface) {
         lastCheck: clockText(nowMs),
         lastOkAt: nowMs,
         items: [
-          // A channel-wide message waits for a press of 「拟稿」; the rest are drafted at once.
+          // A channel-wide or bot message waits for a press of 「拟稿」; the rest are drafted at once.
           ...fresh.map(h =>
-            h.isBroadcast
+            waitsForDraft(h)
               ? { ...h, draft: '', status: 'new' as const }
               : { ...h, draft: '', status: 'drafting' as const, draftingSince: nowMs },
           ),
@@ -480,7 +489,7 @@ async function checkNow($: EngineInterface) {
     const stuck = (await readJson($, 'shared', EMPTY)).items.filter(
       m => m.status === 'drafting' && !fresh.some(h => h.id === m.id) && nowMs - (m.draftingSince ?? 0) > STUCK_DRAFT_MS,
     )
-    for (const hit of fresh) if (!hit.isBroadcast) await draftFor($, hit)
+    for (const hit of fresh) if (!waitsForDraft(hit)) await draftFor($, hit)
     for (const hit of stuck) await redraft($, hit)
   } catch (err) {
     // A refused call is often this session's permission check alone (auto mode's classifier
@@ -854,6 +863,7 @@ export const register: Register = on => {
                 </Text>
                 <Text size="caption" color="subtle" wrap="truncate-start">
                   {m.isBroadcast && <Text color="warning">全员 · </Text>}
+                  {m.isBot && <Text color="suggestion">机器人 · </Text>}
                   {m.channelName} · {shortTime(m.time)}
                 </Text>
               </Box>

@@ -10,6 +10,8 @@ export type Mention = {
   people?: Person[]
   // Reached you through @here / @channel / @everyone rather than by name.
   isBroadcast?: boolean
+  // Sent by a bot or app: shown only when it names me, and drafted only on request.
+  isBot?: boolean
   channelId: string
   channelName: string
   from: string
