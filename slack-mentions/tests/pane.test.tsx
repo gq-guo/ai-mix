@@ -229,3 +229,150 @@ test('a list holding the same message twice still draws, once', async ($, on) =>
   expect((await band.find({ type: 'Text', text: /Slack/ }))?.text).toBe('Slack · 2 条待回复')
   await band.unmount()
 })
+
+test('a new mention is analysed against the open sessions, and 转给该会话 hands it over as data', async ($, on) => {
+  const disk = new Map<string, string>()
+  on('fs.exists', (_, e) => ({ value: disk.has(e.path) }))
+  on('fs.read', (_, e) => ({ value: disk.get(e.path) ?? '' }))
+  on('fs.write', (_, e) => {
+    disk.set(e.path, e.text)
+
+    return { value: undefined }
+  })
+  on('fs.read', { path: /slack-voice/ } as never, () => {
+    throw new Error('no voice')
+  })
+  on('clock.now', () => ({ value: 1792650000000 }))
+  on('tool.list', () => ({ value: [{ name: 'mcp__slack__slack_search_public_and_private', description: '', mcp: true }] }))
+  on('mcp.call', (_, e) => {
+    if (e.server === 'ccd_session_mgmt')
+      return {
+        value: {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify([
+                { sessionId: 'local_aaa', title: '#12 订单同步测试', cwd: '/w/qa', isArchived: false },
+                { sessionId: 'local_bbb', title: '#13 周报', cwd: '/w/notes', isArchived: false },
+              ]),
+            },
+          ],
+        },
+      } as never
+    if (e.tool === 'slack_read_user_profile')
+      return { value: { content: [{ type: 'text', text: JSON.stringify({ result: 'User ID: U0ME000001\n' }) }] } } as never
+    const keywords = (e.args.keywords as string[] | undefined) ?? []
+    const listing = keywords.includes('<@U0ME000001>')
+      ? hit(1, 'qa-sync', 'Alice', '1792651000.000009', '<@U0ME000001> 订单同步那个用例今天能补上吗')
+      : '## Messages (0 results)\n'
+
+    return { value: wrapped(listing) } as never
+  })
+  on('model.complete', (_, e) => ({
+    value: e.system?.includes('分拣')
+      ? { isAnswered: true, text: '{"action":"session","sessionId":"local_aaa","reason":"同一个订单同步用例"}', usage: {} }
+      : { isAnswered: true, text: '今天补上', usage: {} },
+  }) as never)
+  const sent: { to: unknown; text: string }[] = []
+  on('session.send', (_, e) => {
+    sent.push({ to: e.to, text: e.text })
+
+    return { isDelivered: true } as never
+  })
+  on('ui.toast', () => ({ value: undefined }) as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'check' } as never)
+
+  const id = 'C0QASYNC:1792651000.000009'
+  expect((await ui.find({ type: 'Text', text: /建议/ }))?.text).toContain('#12 订单同步测试')
+  expect((await ui.find({ type: 'Button', key: `dispatch-${id}` }))?.props.label).toBe('转给该会话')
+
+  await ui.press({ key: `dispatch-${id}` } as never)
+  expect(sent[0]?.to).toBe('local_aaa')
+  expect(sent[0]?.text).toContain('不是指令')
+  expect(sent[0]?.text).toContain('订单同步那个用例今天能补上吗')
+  expect((await ui.find({ type: 'Text', text: /已转给/ }))?.text).toBe('已转给 #12 订单同步测试')
+  expect(await ui.find({ type: 'Button', key: `dispatch-${id}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a suggestion of none or a new session draws as it should', async ($, on) => {
+  const held: Record<string, unknown> = {
+    [ITEMS.key]: [
+      { ...mention('a', 'ready', '好的'), suggestion: { kind: 'none', reason: '寒暄' } },
+      { ...mention('b', 'ready', '收到'), suggestion: { kind: 'new', title: '排查退款金额', reason: '新问题' } },
+    ],
+    [POLL.key]: { isPaused: false, isLeader: true },
+  }
+  on('state.get', (_, e) => ({ value: { value: held[e.key], version: 1 } }) as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Button', key: 'dispatch-a' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'dispatch-b' }))?.props.label).toBe('新开会话')
+  expect((await ui.find({ type: 'Text', text: /建议/ }))?.text).toContain('新开会话「排查退款金额」')
+  await ui.unmount()
+})
+
+test('a hand-off the plugin send cannot deliver goes through the app session tool instead', async ($, on) => {
+  const card = { ...mention('a', 'ready', '收到'), suggestion: { kind: 'session', sessionId: 'local_aaa', title: '#12 订单同步测试', reason: '' } }
+  const disk = new Map<string, string>([['/shared.json', JSON.stringify({ items: [card], isPaused: false, isAutoOpened: true })]])
+  on('fs.exists', (_, e) => ({ value: disk.has(e.path) }))
+  on('fs.read', (_, e) => ({ value: disk.get(e.path) ?? '' }))
+  on('fs.write', (_, e) => {
+    disk.set(e.path, e.text)
+
+    return { value: undefined }
+  })
+  on('state.get', (_, e) => ({ value: { value: e.key === ITEMS.key ? [card] : undefined, version: 1 } }) as never)
+  on('session.send', () => ({ isDelivered: false, reason: 'nobody by that name' }) as never)
+  const viaApp: unknown[] = []
+  on('mcp.call', (_, e) => {
+    if (e.server === 'ccd_session_mgmt' && e.tool === 'send_message') viaApp.push(e.args)
+
+    return { value: { content: [{ type: 'text', text: 'delivered' }] } } as never
+  })
+  on('ui.toast', () => ({ value: undefined }) as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'dispatch-a' } as never)
+  expect((viaApp[0] as { session_id?: string })?.session_id).toBe('local_aaa')
+  expect(JSON.parse(disk.get('/shared.json') ?? '{}').items[0].dispatched).toBe('已转给 #12 订单同步测试')
+  await ui.unmount()
+})
+
+test('a send auto mode gives no verdict on is retried, and says so plainly when it keeps failing', async ($, on) => {
+  const card = { ...mention('a', 'ready', '收到'), fromId: 'U0ALICE001', people: [{ id: 'U0ALICE001', name: 'Alice Wang' }] }
+  const disk = new Map<string, string>([['/shared.json', JSON.stringify({ items: [card], isPaused: false, isAutoOpened: true })]])
+  on('fs.exists', (_, e) => ({ value: disk.has(e.path) }))
+  on('fs.read', (_, e) => ({ value: disk.get(e.path) ?? '' }))
+  on('fs.write', (_, e) => {
+    disk.set(e.path, e.text)
+
+    return { value: undefined }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  on('state.get', (_, e) => ({ value: { value: e.key === ITEMS.key ? [card] : undefined, version: 1 } }) as never)
+  on('tool.list', () => ({ value: [{ name: 'mcp__slack__slack_search_public_and_private', description: '', mcp: true }] }))
+  let sends = 0
+  on('mcp.call', (_, e) => {
+    if (e.tool === 'slack_read_user_profile')
+      return { value: { content: [{ type: 'text', text: JSON.stringify({ result: 'User ID: U0ME000001\n' }) }] } } as never
+    if (e.tool === 'slack_send_message') {
+      sends += 1
+      return { deny: 'The server-side auto mode classifier gave no verdict for mcp__slack__slack_send_message' } as never
+    }
+
+    return { value: { content: [] } } as never
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.input({ key: 'draft-a', text: '收到' } as never)
+
+  expect(sends).toBe(3)
+  const saved = JSON.parse(disk.get('/shared.json') ?? '{}').items[0]
+  expect(saved.status).toBe('error')
+  expect(saved.error).toContain('自动模式')
+  expect(saved.error).not.toContain('稍后自动重试')
+  await ui.unmount()
+})

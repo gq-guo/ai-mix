@@ -3,6 +3,12 @@ export type MentionStatus = 'new' | 'drafting' | 'ready' | 'sending' | 'sent' | 
 
 export type Person = { id: string; name: string }
 
+// What the analysis suggests doing with a message; nothing runs until the person presses it.
+export type Suggestion =
+  | { kind: 'session'; sessionId: string; title: string; reason: string }
+  | { kind: 'new'; title: string; reason: string }
+  | { kind: 'none'; reason: string }
+
 export type Mention = {
   id: string
   fromId?: string
@@ -12,6 +18,9 @@ export type Mention = {
   isBroadcast?: boolean
   // Sent by a bot or app: shown only when it names me, and drafted only on request.
   isBot?: boolean
+  suggestion?: Suggestion
+  // What the person had done with it: `已转给 …` or `已请求新开会话`.
+  dispatched?: string
   channelId: string
   channelName: string
   from: string
