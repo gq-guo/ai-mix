@@ -42,6 +42,13 @@ export type Compose = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'slack-mentions': { items: Mention[]; poll: PollInfo; isOpen: boolean; compose: Compose }
+    'slack-mentions': {
+      items: Mention[]
+      poll: PollInfo
+      isOpen: boolean
+      compose: Compose
+      // Cards whose long message this session shows whole.
+      expanded: string[]
+    }
   }
 }

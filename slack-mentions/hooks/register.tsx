@@ -39,6 +39,8 @@ const isOpen = atom(IS_OPEN, false)
 const COMPOSE = { plugin: 'slack-mentions', key: 'compose' } as const
 const NO_COMPOSE: Compose = { isOpen: false, query: '', results: [], text: '', status: 'idle' }
 const compose = atom(COMPOSE, NO_COMPOSE)
+const EXPANDED = { plugin: 'slack-mentions', key: 'expanded' } as const
+const expanded = atom(EXPANDED, [] as string[])
 const poll = atom(POLL, { isPaused: false, isLeader: false } as PollInfo)
 
 type Hit = Omit<Mention, 'draft' | 'status' | 'error' | 'draftingSince'> & { isMine?: boolean }
@@ -75,9 +77,17 @@ async function readJson<T>($: EngineInterface, name: string, fallback: T): Promi
 const writeJson = ($: EngineInterface, name: string, value: unknown) =>
   $.fs.write(file(name), JSON.stringify(value, null, 1))
 
+// One card per message: two sessions that check at once (a poll and a press of 刷新) may both add it.
+// The pane refuses a list that draws the same card twice, so the list never keeps a repeat.
+const uniqueById = (items: readonly Mention[]) => {
+  const seen = new Set<string>()
+
+  return items.filter(m => !seen.has(m.id) && Boolean(seen.add(m.id)))
+}
+
 async function mutate($: EngineInterface, fn: (s: Shared) => Shared) {
   const next = fn(await readJson($, 'shared', EMPTY))
-  await writeJson($, 'shared', next)
+  await writeJson($, 'shared', { ...next, items: uniqueById(next.items) })
   await sync($)
 }
 
@@ -98,9 +108,9 @@ async function sync($: EngineInterface) {
   lastSeen = text
 
   const s = JSON.parse(text) as Shared
-  await $.state.set(ITEMS, s.items)
+  await $.state.set(ITEMS, uniqueById(s.items))
   await $.state.set(POLL, { lastCheck: s.lastCheck, error: s.error, isPaused: s.isPaused, isLeader })
-  const open = s.items.filter(m => m.status !== 'sent').length
+  const open = uniqueById(s.items).filter(m => m.status !== 'sent').length
   $.ui.status(open > 0 ? `Slack @我 ${open} 条待回` : undefined)
 }
 
@@ -454,7 +464,11 @@ async function checkNow($: EngineInterface) {
       if (!h.isMine && !isSeen) fresh.push(h)
     }
 
+    // What this round really adds: the list as it stands now, which another session may have just
+    // filled with the same messages, decides. Only those are announced and drafted here.
+    const added: Hit[] = []
     await mutate($, s => {
+      added.push(...fresh.filter(h => !s.items.some(m => m.id === h.id)))
       const replaced = s.items.filter(
         m => dmChannels.has(m.channelId) && !m.threadTs && m.status !== 'sent' && !fresh.some(h => h.id === m.id),
       )
@@ -467,7 +481,7 @@ async function checkNow($: EngineInterface) {
         lastOkAt: nowMs,
         items: [
           // A channel-wide or bot message waits for a press of 「拟稿」; the rest are drafted at once.
-          ...fresh.map(h =>
+          ...added.map(h =>
             waitsForDraft(h)
               ? { ...h, draft: '', status: 'new' as const }
               : { ...h, draft: '', status: 'drafting' as const, draftingSince: nowMs },
@@ -477,19 +491,19 @@ async function checkNow($: EngineInterface) {
       }
     })
     await markHandled($, superseded)
-    const wide = fresh.filter(h => h.isBroadcast).length
-    if (fresh.length > 0)
+    const wide = added.filter(h => h.isBroadcast).length
+    if (added.length > 0)
       void $.ui
-        .notify(`${fresh.length} 条新消息${wide > 0 ? `（含 ${wide} 条全员）` : ''}，输入 /slack-mentions 查看`, {
+        .notify(`${added.length} 条新消息${wide > 0 ? `（含 ${wide} 条全员）` : ''}，输入 /slack-mentions 查看`, {
           title: TITLE,
         })
         .catch(() => {})
 
     // Drafts a session left unfinished (it closed mid-draft) are taken over here.
     const stuck = (await readJson($, 'shared', EMPTY)).items.filter(
-      m => m.status === 'drafting' && !fresh.some(h => h.id === m.id) && nowMs - (m.draftingSince ?? 0) > STUCK_DRAFT_MS,
+      m => m.status === 'drafting' && !added.some(h => h.id === m.id) && nowMs - (m.draftingSince ?? 0) > STUCK_DRAFT_MS,
     )
-    for (const hit of fresh) if (!waitsForDraft(hit)) await draftFor($, hit)
+    for (const hit of added) if (!waitsForDraft(hit)) await draftFor($, hit)
     for (const hit of stuck) await redraft($, hit)
   } catch (err) {
     // A refused call is often this session's permission check alone (auto mode's classifier
@@ -708,7 +722,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
-    const pending = (await read($, items)).filter(m => m.status !== 'sent').length
+    const pending = uniqueById(await read($, items)).filter(m => m.status !== 'sent').length
     const shown = await read($, isOpen)
 
     return (
@@ -726,9 +740,10 @@ export const register: Register = on => {
     const { Box, Text, Button, Link } = ui
     // Mobile draws no text field: the draft is shown read-only there.
     const Input = e.surface !== 'mobile' && 'Input' in ui ? ui.Input : undefined
-    const list = await read($, items)
+    const list = uniqueById(await read($, items))
     const p = await read($, poll)
     const c = await read($, compose)
+    const whole = await read($, expanded)
 
     const open = list.filter(m => m.status !== 'sent')
     const targetName = (t: Target) => (t.kind === 'user' ? `@${t.name}` : `#${t.name}`)
@@ -844,7 +859,10 @@ export const register: Register = on => {
           </Text>
         )}
         {open.map(m => {
-          const parts = slackParts(m.text, TEXT_SHOWN)
+          const full = slackParts(m.text, Infinity)
+          const isLong = full.reduce((n, part) => n + part.text.length, 0) > TEXT_SHOWN
+          const isWhole = whole.includes(m.id)
+          const parts = isLong && !isWhole ? slackParts(m.text, TEXT_SHOWN) : full
           const isEditable = m.status === 'ready' || m.status === 'error' || m.status === 'new'
 
           return (
@@ -870,6 +888,20 @@ export const register: Register = on => {
               <Text size="footnote">
                 {parts.map(part => (part.href ? <Link href={part.href} label={part.text} /> : part.text))}
               </Text>
+              {isLong && (
+                <Box flexDirection="row">
+                  <Button
+                    key={`more-${m.id}`}
+                    label={isWhole ? '收起' : '展开'}
+                    plain
+                    onPress={() =>
+                      void update($, expanded, ids =>
+                        (ids ?? []).includes(m.id) ? (ids ?? []).filter(id => id !== m.id) : [...(ids ?? []), m.id],
+                      )
+                    }
+                  />
+                </Box>
+              )}
               {m.status === 'drafting' && (
                 <Text size="caption" color="subtle">
                   正在拟稿…

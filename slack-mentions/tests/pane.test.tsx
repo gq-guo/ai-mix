@@ -185,3 +185,47 @@ test('a refresh keeps only real channel-wide mentions from people, undrafted and
   expect(await ui.find({ type: 'Button', key: 'redo-C0ALERTS:1792651000.000003' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a long message folds to its head with 展开, and 收起 once it is shown whole', async ($, on) => {
+  const long = `开头 ${'很长的故障通报内容，'.repeat(40)}结尾在这里`
+  const held: Record<string, unknown> = {
+    [ITEMS.key]: [{ ...mention('a', 'ready', '收到'), text: long }, mention('b', 'ready', '好的')],
+    [POLL.key]: { isPaused: false, isLeader: true },
+    expanded: [],
+  }
+  on('state.get', (_, e) => ({ value: { value: held[e.key], version: 1 } }) as never)
+
+  const folded = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await folded.find({ type: 'Text', text: /^开头/ }))?.text).not.toContain('结尾在这里')
+  expect((await folded.find({ type: 'Button', key: 'more-a' }))?.props.label).toBe('展开')
+  expect(await folded.find({ type: 'Button', key: 'more-b' })).toBeUndefined()
+  await folded.unmount()
+
+  held.expanded = ['a']
+  const open = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await open.find({ type: 'Text', text: /^开头/ }))?.text).toContain('结尾在这里')
+  expect((await open.find({ type: 'Button', key: 'more-a' }))?.props.label).toBe('收起')
+  await open.unmount()
+})
+
+test('a list holding the same message twice still draws, once', async ($, on) => {
+  const held: Record<string, unknown> = {
+    [ITEMS.key]: [mention('a', 'ready', '收到'), mention('b', 'ready', '好的'), mention('a', 'ready', '收到')],
+    [POLL.key]: { isPaused: false, isLeader: true },
+  }
+  on('state.get', (_, e) => ({ value: { value: held[e.key], version: 1 } }) as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Input', key: 'draft-a' })).toBeDefined()
+  expect(await ui.find({ type: 'Input', key: 'draft-b' })).toBeDefined()
+  await ui.unmount()
+
+  const band = await $.ui.mount({
+    plugin: 'slack-mentions',
+    component: 'AbovePrompt',
+    surface: 'desktop',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 60, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  } as never)
+  expect((await band.find({ type: 'Text', text: /Slack/ }))?.text).toBe('Slack · 2 条待回复')
+  await band.unmount()
+})
