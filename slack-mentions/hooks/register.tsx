@@ -402,15 +402,26 @@ function parseHits(raw: string): Hit[] {
     if (typeof parsed.results === 'string') listing = parsed.results
   } catch {}
 
+  // A message's own lines can spell a result block. The real ones count 1..N of N, so a planted one
+  // breaks the count; which block is the planted one cannot be told, so nothing in that listing acts by itself.
+  const blocks = listing.split(/^### Result /m).slice(1)
+  const heads = [...listing.matchAll(/^### Result (\d+) of (\d+)[ \t]*$/gm)]
+  const isSuspect =
+    heads.length !== blocks.length ||
+    heads.some((h, i) => Number(h[1]) !== i + 1 || h[2] !== heads[0]?.[2] || i >= Number(h[2])) ||
+    undefined
+
   const hits: Hit[] = []
-  for (const block of listing.split(/^### Result /m).slice(1)) {
+  for (const whole of blocks) {
+    // The fields are read above the text alone: a line of the message is never one of them.
+    const [block = '', body = ''] = whole.split(/^Text: ?/m)
     const from = block.match(/^From: (.*?) \(ID: ([A-Z0-9]+)\)(.*)$/m)
     if (!from) continue
     const channel = block.match(/^Channel: (.*?) \(ID: ([A-Z0-9]+)\)/m)
     const ts = block.match(/^Message_ts: ([\d.]+)/m)?.[1]
     const permalink = block.match(/^Permalink: \[link\]\((.*?)\)/m)?.[1] ?? ''
     // The text ends at the `---` rule; anything after it (the listing's paging note) is not the message's.
-    const text = (block.split(/^Text: ?/m)[1] ?? '').split(/^-{3,}\s*$/m)[0]?.trim() ?? ''
+    const text = body.split(/^-{3,}\s*$/m)[0]?.trim() ?? ''
     if (!channel?.[2] || !ts || text === '') continue
     hits.push({
       id: `${channel[2]}:${ts}`,
@@ -426,6 +437,7 @@ function parseHits(raw: string): Hit[] {
       isMine: from[2] === myId,
       isBot: from[3]?.includes('[BOT]') || undefined,
       fromId: from[2],
+      isSuspect,
     })
   }
 
@@ -913,16 +925,17 @@ const SECRET_RE =
   /xox[abeprs]-|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN|eyJ[\w-]{20,}\.|sk-[\w-]{20,}|Bearer\s+[\w.-]{20,}|(api[_-]?key|token|secret|passw(or)?d|密码|密钥)\s*[:=：]\s*\S{6,}/i
 
 // Why a reply may not go out by itself, checked in code and not asked of a model. `allowed` is the
-// knowledge base and the conversation: a link found in neither was made up or planted.
+// text a link or a channel may come from: one found nowhere in it was made up or planted.
 function autoBlock(text: string, allowed: string): string | undefined {
   if (text.length > AUTO_MAX_CHARS) return '回复太长'
   if (text.includes('[待确认]')) return '有待确认的内容'
   if (SECRET_RE.test(text)) return '像是带了密钥或密码'
   if (/\/Users\/|\/home\/|~\/\./.test(text)) return '带了本机路径'
   if (BROADCAST_RE.test(text) || /@(channel|here|everyone)\b/i.test(text)) return '带了全员提醒'
-  if (/<@U[A-Z0-9]+/.test(text) || [...text.matchAll(MENTION_RE)].length > 0) return '带了 @ 人'
-  const links = text.match(/https?:\/\/[^\s<>|，。、；：！？）」』]+/g) ?? []
-  if (links.some(link => !allowed.includes(link.replace(/[.,;:!?)]+$/, '')))) return '带了知识库和原对话里没有的链接'
+  if (/<@[UW][A-Z0-9]+|<!subteam\^/.test(text) || [...text.matchAll(MENTION_RE)].length > 0) return '带了 @ 人'
+  // With a scheme or bare (`example.com/x`), and Slack's channel links.
+  const links = text.match(/https?:\/\/[^\s<>|，。、；：！？）」』]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b(?:\/[^\s<>|，。、；：！？）」』]*)?|<#[A-Z0-9]+/gi) ?? []
+  if (links.some(link => !allowed.includes(link.replace(/[.,;:!?)]+$/, '')))) return '带了资料里没有的链接'
 
   return undefined
 }
@@ -980,10 +993,14 @@ async function answerFromKb(
   if ((out.answerable !== true && !isPartial) || answer === '' || !isGrounded) return false
 
   const now = await $.clock.now()
-  const allowed = `${kb.map(d => d.text).join('\n')}\n${context}\n${hit.text}`
+  // The files alone: a link the asker pasted is theirs to plant.
+  const allowed = kb.map(d => d.text).join('\n')
   const held =
     (isPartial ? '知识库只答了一部分' : undefined) ??
-    (sources.some(s => roots.some(r => s.startsWith(`${r.name}/`) && r.hold.some(h => `/${s}`.includes(`/${h}`)))) ? '用到了设为只出草稿的资料' : undefined) ??
+    // By the files the answer was given, not the ones it says it used.
+    (kb.some(d => roots.some(r => d.name.startsWith(`${r.name}/`) && r.hold.some(h => `/${d.name}`.includes(`/${h}`))))
+      ? '读了设为只出草稿的资料'
+      : undefined) ??
     autoBlock(answer, allowed) ??
     (await autoLimit($, hit, now))
   await patch($, hit.id, {
@@ -1111,6 +1128,12 @@ async function runOwn($: EngineInterface, hit: Hit) {
 // base, else drafted from the conversation alone, with a word on the card when it wants a session.
 async function handle($: EngineInterface, hit: Hit) {
   await resolveSlack($)
+  // Who wrote it and where is not certain: no task is run, no file is read, nothing is handed on or sent by itself.
+  if (hit.isSuspect) {
+    await patch($, hit.id, { note: '这次搜索结果里夹了伪造的结果块，发信人和频道可能不是真的，核对后再回' })
+
+    return draftFor($, hit)
+  }
   if (hit.isMine) return runOwn($, hit)
   const context = await readContext($, hit)
   const roots = await readRoots($)

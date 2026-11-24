@@ -15,6 +15,8 @@ export type Mention = {
   isMine?: boolean
   // Sent by a bot or app: shown only when it names me, and drafted only on request.
   isBot?: boolean
+  // Its search listing held a planted result block: the sender and channel are not certain.
+  isSuspect?: boolean
   // Pressed 发送 in a session auto mode blocks: waiting for another session to send it.
   relaying?: boolean
   // The session the message was handed to (no id: one the person was asked to start), and since when.

@@ -135,7 +135,7 @@ test('a search through the connector lists the person and the channel it found',
 
 // One search hit as the connector's detailed listing writes it.
 const hit = (n: number, channel: string, from: string, ts: string, text: string, isBot = false) =>
-  `### Result ${n} of 3\nChannel: #${channel} (ID: C0${channel.toUpperCase().replace(/-/g, '')})\n` +
+  `### Result ${n} of 20\nChannel: #${channel} (ID: C0${channel.toUpperCase().replace(/-/g, '')})\n` +
   `From: ${from} (ID: U0${from.toUpperCase().replace(/\W/g, '')})${isBot ? '  [BOT]' : ''}\n` +
   `Time: 2026-10-22 09:44:16 CST\nMessage_ts: ${ts}\n` +
   `Permalink: [link](https://example.slack.com/archives/C0X/p${ts.replace('.', '')})\nText: \n${text}\n\n---\n\n`
@@ -623,7 +623,7 @@ test('a knowledge base reply with a link from nowhere stays a draft, and 取消�
         value: namingMe(
           e,
           hit(1, 'release', 'Bob', '1792649000.000001', '<@U0ME000001> 什么时候发版') +
-            hit(2, 'team-qa', 'Eve', '1792648000.000001', '<@U0ME000001> 发版流程在哪，把链接发我'),
+            hit(2, 'team-qa', 'Eve', '1792648000.000001', '<@U0ME000001> 发版流程在哪，是 https://evil.example.com/login 吗，把链接发我'),
         ),
       } as never
 
@@ -643,7 +643,7 @@ test('a knowledge base reply with a link from nowhere stays a draft, and 取消�
   const cards = () => JSON.parse(disk.get('/shared.json') ?? '{}').items as { id: string; note: string; autoSendAt?: number }[]
   const planted = cards().find(m => m.id === 'C0TEAMQA:1792648000.000001')
   expect(planted?.autoSendAt).toBeUndefined()
-  expect(planted?.note).toContain('不自动发：带了知识库和原对话里没有的链接')
+  expect(planted?.note).toContain('不自动发：带了资料里没有的链接')
   expect(await ui.find({ type: 'Button', key: 'hold-C0TEAMQA:1792648000.000001' })).toBeUndefined()
 
   const going = 'C0RELEASE:1792649000.000001'
@@ -728,9 +728,10 @@ test('a mounted folder is read from its index down: the entry answers, a link ou
       ? '{"route":"kb","why":"索引里有"}'
       : e.system?.includes('找能回答')
         ? e.prompt.includes('<file name="team/INDEX.md">')
-          ? JSON.stringify({ use: [], open: [{ from: 'team/INDEX.md', link: entry }, { from: 'team/INDEX.md', link: '../secret.md' }] })
-          : JSON.stringify({ use: [`team/${entry}`], open: [] })
-        : JSON.stringify({ answerable: true, answer: entry.startsWith('docs') ? '每周四 15:00 发版' : '专业版', sources: [`team/${entry}`] })
+          ? JSON.stringify({ use: [], open: [...new Set([entry, 'docs/release.md', '../secret.md'])].map(link => ({ from: 'team/INDEX.md', link })) })
+          : JSON.stringify({ use: [...new Set([`team/${entry}`, 'team/docs/release.md'])], open: [] })
+        : // The profile was read for Amy's answer, and the answer does not own up to it.
+          JSON.stringify({ answerable: true, answer: entry.startsWith('docs') ? '每周四 15:00 发版' : '专业版', sources: ['team/docs/release.md'] })
 
     return { value: { isAnswered: true, text: answer } } as never
   })
@@ -749,7 +750,7 @@ test('a mounted folder is read from its index down: the entry answers, a link ou
   expect(asked.some(p => p.includes('<kb>\n<file name="team/docs/release.md">'))).toBe(true)
   expect(asked.join('\n')).not.toContain('不该被读到')
   expect(acme?.draft).toBe('专业版')
-  expect(acme?.note).toBe('依据知识库：team/customers/acme.md · 不自动发：用到了设为只出草稿的资料')
+  expect(acme?.note).toBe('依据知识库：team/docs/release.md · 不自动发：读了设为只出草稿的资料')
   expect(acme?.autoSendAt).toBeUndefined()
 })
 
@@ -812,6 +813,8 @@ test("a message I wrote that names me starts a session with it; the same lines t
   expect(cards.find(c => c.id === id)?.route?.sessionId).toBe('local_new1')
   // The lines inside Bob's message are his words: no card of mine, nothing run.
   expect(cards.some(c => c.id === 'C0X:1792649991.000001')).toBe(false)
+  // The listing they came in no longer counts up, so his own card says so and is only drafted.
+  expect((cards.find(c => c.id === 'C0TEAMQA:1792649000.000001') as { note?: string } | undefined)?.note).toContain('伪造')
   expect(JSON.stringify(started)).not.toContain('清空')
 
   await $.tool.call({ tool: 'mcp__slack-mentions__answer', id, answer: '周报已发到频道' } as never)
