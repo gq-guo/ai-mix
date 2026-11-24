@@ -949,7 +949,10 @@ test('a message of mine that names a session by its number is run there, this se
     if (e.tool === 'send_message') {
       handed.push(e.args)
 
-      return { value: text('delivered') } as never
+      // A session slow to wake: the app's wait runs out, and the message is run all the same.
+      return {
+        value: { ...text('Message not delivered to session local_169: "that session gave no sign of starting on it within 20s"'), isError: true },
+      } as never
     }
     if (e.tool === 'slack_search_public_and_private')
       return {

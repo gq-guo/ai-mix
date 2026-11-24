@@ -949,7 +949,10 @@ async function handOff(
     session_id: d.session.sessionId,
     message,
   })
-  if (sent.isError) throw new Error(resultText(sent) || '对方 session 没有收下')
+  // A session slow to wake: the app stops waiting after 20s and says so as an error, yet the message is
+  // in that session and is run when it wakes. It counts as handed over, or its answer would find no card waiting.
+  const isLate = /no sign of starting/i.test(resultText(sent))
+  if (sent.isError && !isLate) throw new Error(resultText(sent) || '对方 session 没有收下')
 
   const route = { sessionId: d.session.sessionId, title: d.session.title }
   await patch($, hit.id, {
