@@ -112,6 +112,8 @@ let isPolling = false
 let home = ''
 let noticeMark: string | undefined
 let fullUntil = 0
+// A notification came and no full check has started since: one that came mid-round is not lost with it.
+let wantsFull = false
 let lastFullAt = 0
 const NONE = { content: [] as { type: string; text?: string }[], isError: false }
 const BROADCAST_WORDS = ['<!here>', '<!channel>']
@@ -147,10 +149,27 @@ const uniqueById = (items: readonly Mention[]) => {
   return items.filter(m => !seen.has(m.id) && Boolean(seen.add(m.id)))
 }
 
-async function mutate($: EngineInterface, fn: (s: Shared) => Shared) {
-  const next = fn(await readJson($, 'shared', EMPTY))
-  await writeJson($, 'shared', { ...next, items: uniqueById(next.items) })
-  await sync($)
+// One change at a time in this session: a press that lands while the poll is between its read and its
+// write would be written away. Another session's write can still cross; what must not be lost to that
+// (a stop of an automatic reply) is kept in a file of its own.
+let changes: Promise<unknown> = Promise.resolve()
+
+function mutate($: EngineInterface, fn: (s: Shared) => Shared): Promise<void> {
+  const run = changes.then(async () => {
+    const next = fn(await readJson($, 'shared', EMPTY))
+    await writeJson($, 'shared', { ...next, items: uniqueById(next.items) })
+    await sync($)
+  })
+  changes = run.catch(() => {})
+
+  return run
+}
+
+// 「取消自动发送」, and an edit of a reply that was about to go: the card never goes out by itself again.
+async function stopAuto($: EngineInterface, id: string, change: Partial<Mention> = {}) {
+  const ids = await readJson<string[]>($, 'stopped', []).catch(() => [])
+  await writeJson($, 'stopped', [...ids.filter(x => x !== id), id].slice(-MAX_HANDLED))
+  await patch($, id, { ...change, autoSendAt: undefined })
 }
 
 const patch = ($: EngineInterface, id: string, change: Partial<Mention>) =>
@@ -1016,6 +1035,14 @@ async function answerFromKb(
   return true
 }
 
+// This session, as the app knows it; empty when the app does not say.
+const selfSession = async ($: EngineInterface): Promise<Record<string, unknown>> =>
+  $.mcp
+    .call(await resolveSessions($), 'get_session', { session_id: 'self' })
+    // The answer is one JSON object, read as it came: `resultText` would flatten it to its values.
+    .then(r => (r.isError ? {} : jsonIn((r.content ?? []).map(b => ('text' in b ? String(b.text) : '')).join(''))))
+    .catch(() => ({}))
+
 const ownTask = (hit: Hit) => hit.text.replace(new RegExp(`<@${myId}(\\|[^>]*)?>`, 'g'), '').trim()
 
 // What a session reads when the message is my own: an instruction, run under that session's own rules.
@@ -1072,11 +1099,7 @@ async function runOwn($: EngineInterface, hit: Hit) {
       return
     }
     // The app's list leaves out the session that asks: the number may be this very session's.
-    const self = await $.mcp
-      .call(await resolveSessions($), 'get_session', { session_id: 'self' })
-      // The answer is one JSON object, read as it came: `resultText` would flatten it to its values.
-      .then(r => (r.isError ? {} : jsonIn((r.content ?? []).map(b => ('text' in b ? String(b.text) : '')).join(''))))
-      .catch(() => ({}) as Record<string, unknown>)
+    const self = await selfSession($)
     const title = typeof self.title === 'string' ? self.title : ''
     if (!isIt({ title })) return stays(`没找到 #${no} 这个 session`)
     const entered = await $.prompt.submit({ text: ownBrief(hit) }).catch(e => ({ drop: String(e) }))
@@ -1162,6 +1185,13 @@ async function sendDue($: EngineInterface) {
       // Stopped or edited since it was read: it is the person's to send now.
       const current = (await read()).find(x => x.id === m.id)
       if (current?.autoSendAt === undefined || current.draft !== m.draft) continue
+      // A stop the shared file lost to another session's write still holds. Unreadable: not sent this round.
+      const stopped = await readJson<string[]>($, 'stopped', []).catch(() => undefined)
+      if (!stopped) continue
+      if (stopped.includes(m.id)) {
+        await patch($, m.id, { autoSendAt: undefined })
+        continue
+      }
       await patch($, m.id, { autoSendAt: undefined })
       // Long overdue (polling was paused, or no session was open): the minute to stop it in was
       // never shown to anyone, so it waits for a press instead.
@@ -1207,6 +1237,11 @@ async function takeAnswer($: EngineInterface, input: { id?: unknown; answer?: un
   const item = (await readJson($, 'shared', EMPTY)).items.find(m => m.id === id)
   if (!item?.route || !['waiting', 'ready', 'new', 'error'].includes(item.status))
     return '面板上没有在等这条消息的回答，结果没有采用。'
+  // A card's id is its channel and time, which anyone in the channel can read: only the session the
+  // message was handed to answers it. Where either side is not known, the answer is a draft and no more.
+  const caller = (await selfSession($)).sessionId
+  const isKnown = item.route.sessionId !== '' && typeof caller === 'string'
+  if (isKnown && caller !== item.route.sessionId) return '这条消息交给的是另一个 session，结果没有采用。'
 
   const reason = typeof input.reason === 'string' ? input.reason.slice(0, 80) : ''
   await patch($, id, {
@@ -1220,7 +1255,7 @@ async function takeAnswer($: EngineInterface, input: { id?: unknown; answer?: un
   // The result of a task of mine goes back under my own message by itself, past the same checks in
   // code; `allowed` is what the session answered and what I wrote. Anyone else's stays a draft.
   // It is due at once, with no minute to stop it in: the reader is me. The next poll sends it.
-  if (item.isMine && answer) {
+  if (item.isMine && answer && isKnown) {
     const drafted = (await readJson($, 'shared', EMPTY)).items.find(m => m.id === id)
     if (drafted?.status === 'ready') {
       const held = autoBlock(drafted.draft, `${answer}\n${item.text}`)
@@ -1381,10 +1416,18 @@ async function checkNow($: EngineInterface, isFull = true) {
               : { ...h, draft: '', status: 'drafting' as const, draftingSince: nowMs },
           ),
           ...s.items.filter(m => !replaced.includes(m) && m.status !== 'sent'),
-        ].slice(0, MAX_ITEMS),
+        ],
       }
     })
-    await markHandled($, superseded)
+    // The list keeps the newest; a card pushed off its end is set aside, or every round would find it new again.
+    const dropped: string[] = []
+    await mutate($, s => {
+      dropped.push(...s.items.slice(MAX_ITEMS).map(m => m.id))
+
+      return { ...s, items: s.items.slice(0, MAX_ITEMS) }
+    })
+    added.splice(0, added.length, ...added.filter(h => !dropped.includes(h.id)))
+    await markHandled($, [...superseded, ...dropped])
     const wide = added.filter(h => h.isBroadcast).length
     if (added.length > 0)
       void $.ui
@@ -1433,9 +1476,14 @@ async function tick($: EngineInterface) {
   await sendDue($).catch(() => {})
   const notified = await slackNotified($)
   const now = await $.clock.now()
-  if (notified) fullUntil = now + SIGNAL_MS
+  if (notified) {
+    fullUntil = now + SIGNAL_MS
+    wantsFull = true
+  }
   if (Boolean(s.byNotice) !== (notified !== undefined)) await mutate($, x => ({ ...x, byNotice: notified !== undefined }))
-  await checkNow($, notified === undefined || now < fullUntil || now - lastFullAt >= FULL_MS)
+  const isFull = notified === undefined || wantsFull || now < fullUntil || now - lastFullAt >= FULL_MS
+  if (isFull && !isPolling) wantsFull = false
+  await checkNow($, isFull)
 }
 
 async function send($: EngineInterface, id: string) {
@@ -1934,7 +1982,7 @@ export const register: Register = on => {
                     key={`hold-${m.id}`}
                     label="取消自动发送"
                     plain
-                    onPress={() => void patch($, m.id, { autoSendAt: undefined })}
+                    onPress={() => void stopAuto($, m.id).catch(() => $.ui.toast('没能取消自动发送，再点一次'))}
                   />
                 </Box>
               )}
@@ -1948,7 +1996,7 @@ export const register: Register = on => {
                     placeholder={m.status === 'new' ? '自己写，或点「拟稿」' : '回复内容'}
                     submitLabel="发送"
                     // An edited draft is the person's own: it no longer goes out by itself.
-                    onInput={(v: string) => void patch($, m.id, { draft: v, autoSendAt: undefined })}
+                    onInput={(v: string) => void (m.autoSendAt === undefined ? patch($, m.id, { draft: v }) : stopAuto($, m.id, { draft: v }))}
                     onSubmit={(v: string) => {
                       if (isEditable) void patch($, m.id, { draft: v, autoSendAt: undefined }).then(() => send($, m.id))
                     }}
