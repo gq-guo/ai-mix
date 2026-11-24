@@ -986,6 +986,7 @@ test('a message of mine that names a session by its number is run there, this se
   expect(handed[0]?.session_id).toBe('local_169')
   expect(String(handed[0]?.message)).toContain('把周报发一下')
   expect(card('把周报发一下')?.status).toBe('waiting')
+  expect(card('把周报发一下')?.note).toContain('到那个 session 里批准')
   // The session that polls is not in its own list: it takes the task as a prompt of its own.
   // 「查一下」 asks for a lookup, but the number it names wins: no new session.
   expect(entered).toHaveLength(1)

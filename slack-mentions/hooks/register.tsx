@@ -939,18 +939,21 @@ const brief = (hit: Hit, ask?: string) =>
 
 // Hands the message to the session and leaves the card waiting; rejects with the reason, word for word,
 // when the session could not be reached.
+const LATE_NOTE = '对方 session 还没开始处理，可能在等你到那个 session 里批准这条消息'
+
 async function handOff(
   $: EngineInterface,
   hit: Hit,
   d: Extract<Decision, { route: 'session' }>,
   message = brief(hit, d.ask),
-): Promise<true> {
+): Promise<true | 'late'> {
   const sent = await $.mcp.call(await resolveSessions($), 'send_message', {
     session_id: d.session.sessionId,
     message,
   })
-  // A session slow to wake: the app stops waiting after 20s and says so as an error, yet the message is
-  // in that session and is run when it wakes. It counts as handed over, or its answer would find no card waiting.
+  // The app stops waiting after 20s and says so as an error, yet the message is in that session: it is
+  // slow to wake, or the app holds the message for my approval there (its permission mode differs from
+  // the sender's). It counts as handed over, or its answer would find no card waiting.
   const isLate = /no sign of starting/i.test(resultText(sent))
   if (sent.isError && !isLate) throw new Error(resultText(sent) || '对方 session 没有收下')
 
@@ -960,7 +963,7 @@ async function handOff(
     waitingSince: await $.clock.now(),
     draftingSince: undefined,
     route,
-    note: d.why,
+    note: isLate ? `${d.why ? `${d.why} · ` : ''}${LATE_NOTE}` : d.why,
   })
   // The conversation's later messages go to the same session.
   // Put last again, so the cap drops the routes longest unused, not the oldest still in use.
@@ -968,7 +971,7 @@ async function handOff(
   const routes = { ...others, [threadKey(hit)]: { ...route, at: await $.clock.now() } }
   await writeJson($, 'routes', Object.fromEntries(Object.entries(routes).slice(-MAX_ROUTES)))
 
-  return true
+  return isLate ? 'late' : true
 }
 
 const SECRET_RE =
@@ -1121,12 +1124,12 @@ async function runOwn($: EngineInterface, hit: Hit) {
     const isIt = (s: { title: string }) => new RegExp(`^[#＃]${no}(?!\\d)`).test(s.title)
     const other = (await listSessions($, 200)).find(isIt)
     if (other) {
-      const failed = await handOff($, hit, { route: 'session', session: other, why: '' }, ownBrief(hit)).then(
-        () => undefined,
-        err => String(err).replace(/^(Hooks)?Error:\s*/, '').slice(0, 200),
-      )
+      let failed: string | undefined
+      const handed = await handOff($, hit, { route: 'session', session: other, why: '' }, ownBrief(hit)).catch(err => {
+        failed = String(err).replace(/^(Hooks)?Error:\s*/, '').slice(0, 200)
+      })
       if (failed !== undefined) return stays(`没能把指令交给 ${other.title}（${failed}）`)
-      await patch($, hit.id, { note: `你的指令，已交给 ${other.title} 执行` })
+      await patch($, hit.id, { note: `你的指令，已交给 ${other.title} 执行${handed === 'late' ? ` · ${LATE_NOTE}` : ''}` })
       return
     }
     // The app's list leaves out the session that asks: the number may be this very session's.
