@@ -70,7 +70,12 @@ type Shared = {
   notice?: string
   // The Mac's Slack notifications can be read here, so they decide when other people's messages are searched for.
   byNotice?: boolean
+  // Messages for a session whose permission mode is not the poller's, each waiting for the session of
+  // that same mode named in `via` to send it: the app holds a message from a sender of another mode.
+  handoffs?: Handoff[]
 }
+
+type Handoff = { id: string; itemId: string; via: string; title: string; args: { session_id: string; message: string }; queuedAt: number }
 
 type Outbox = {
   id: string
@@ -939,6 +944,86 @@ const brief = (hit: Hit, ask?: string) =>
 
 // Hands the message to the session and leaves the card waiting; rejects with the reason, word for word,
 // when the session could not be reached.
+const MODE_FRESH_MS = 3 * 60_000
+const HANDOFF_WAIT_MS = 45_000
+let selfId = ''
+let registeredAt = 0
+
+// Each session writes down its own permission mode, the one thing about it only it can read.
+async function registerMode($: EngineInterface) {
+  const now = await $.clock.now()
+  if (now - registeredAt < 60_000) return
+  const self = await selfSession($)
+  if (typeof self.sessionId !== 'string' || typeof self.permissionMode !== 'string') return
+  registeredAt = now
+  selfId = self.sessionId
+  const modes = await readJson<Record<string, { mode: string; at: number }>>($, 'modes', {}).catch(() => ({}))
+  const fresh = Object.entries(modes).filter(([id, m]) => id !== selfId && now - m.at < MODE_FRESH_MS)
+  await writeJson($, 'modes', Object.fromEntries([...fresh, [selfId, { mode: self.permissionMode, at: now }]]))
+}
+
+// Gives the message to the session; 'late' when the app's wait for it to start ran out.
+async function sendTo($: EngineInterface, args: Handoff['args']): Promise<true | 'late'> {
+  const sent = await $.mcp.call(await resolveSessions($), 'send_message', args)
+  // The app stops waiting after 20s and says so as an error, yet the message is in that session: it is
+  // slow to wake, or the app holds the message for my approval there (its permission mode differs from
+  // the sender's). It counts as handed over, or its answer would find no card waiting.
+  const isLate = /no sign of starting/i.test(resultText(sent))
+  if (sent.isError && !isLate) throw new Error(resultText(sent) || '对方 session 没有收下')
+
+  return isLate ? 'late' : true
+}
+
+// An open session in the target's own permission mode, when that mode is not this session's: it sends in my place.
+async function sameModeSender($: EngineInterface, target: string): Promise<string | undefined> {
+  const now = await $.clock.now()
+  const modes = await readJson<Record<string, { mode: string; at: number }>>($, 'modes', {}).catch(() => ({}))
+  const live = Object.entries(modes).filter(([, m]) => now - m.at < MODE_FRESH_MS)
+  const mode = (id: string) => live.find(([x]) => x === id)?.[1].mode
+  if (!selfId || !mode(target) || !mode(selfId) || mode(target) === mode(selfId)) return undefined
+
+  return live.find(([id, m]) => id !== target && id !== selfId && m.mode === mode(target))?.[0]
+}
+
+let isHanding = false
+
+// Run in every session: sends the messages left for this one to send, and, in the poller, sends those
+// nobody picked up in time itself (the app then holds them for approval, and the card says so).
+async function processHandoffs($: EngineInterface) {
+  if (isHanding) return
+  isHanding = true
+  try {
+    const now = await $.clock.now()
+    const all = (await readJson($, 'shared', EMPTY)).handoffs ?? []
+    const mine = all.filter(h => (selfId !== '' && h.via === selfId) || (isLeader && now - h.queuedAt > HANDOFF_WAIT_MS))
+    if (mine.length === 0) return
+    // Taken off the list first: sent once, by this session alone.
+    const taken: Handoff[] = []
+    await mutate($, s => {
+      taken.push(...(s.handoffs ?? []).filter(h => mine.some(m => m.id === h.id)))
+
+      return { ...s, handoffs: (s.handoffs ?? []).filter(h => !taken.includes(h)) }
+    })
+    for (const h of taken) {
+      const outcome = await sendTo($, h.args).catch(err => String(err).replace(/^(Hooks)?Error:\s*/, '').slice(0, 200))
+      if (outcome === true) continue
+      await mutate($, s => ({
+        ...s,
+        items: s.items.map(m => {
+          if (m.id !== h.itemId || m.status !== 'waiting') return m
+          if (outcome === 'late') return { ...m, note: `${m.note ? `${m.note} · ` : ''}${LATE_NOTE}` }
+
+          return { ...m, status: 'new' as const, waitingSince: undefined, route: undefined, wantsSession: true, note: `没能交给 ${h.title}（${outcome}）` }
+        }),
+      }))
+    }
+  } catch {
+    // A file caught mid-write: the next round tries again.
+  } finally {
+    isHanding = false
+  }
+}
+
 const LATE_NOTE = '对方 session 还没开始处理，可能在等你到那个 session 里批准这条消息'
 
 async function handOff(
@@ -947,15 +1032,15 @@ async function handOff(
   d: Extract<Decision, { route: 'session' }>,
   message = brief(hit, d.ask),
 ): Promise<true | 'late'> {
-  const sent = await $.mcp.call(await resolveSessions($), 'send_message', {
-    session_id: d.session.sessionId,
-    message,
-  })
-  // The app stops waiting after 20s and says so as an error, yet the message is in that session: it is
-  // slow to wake, or the app holds the message for my approval there (its permission mode differs from
-  // the sender's). It counts as handed over, or its answer would find no card waiting.
-  const isLate = /no sign of starting/i.test(resultText(sent))
-  if (sent.isError && !isLate) throw new Error(resultText(sent) || '对方 session 没有收下')
+  const args = { session_id: d.session.sessionId, message }
+  const via = await sameModeSender($, d.session.sessionId)
+  const now = await $.clock.now()
+  const isLate = via === undefined && (await sendTo($, args)) === 'late'
+  if (via !== undefined)
+    await mutate($, s => ({
+      ...s,
+      handoffs: [...(s.handoffs ?? []), { id: `${ME}:${now}:${hit.id}`, itemId: hit.id, via, title: d.session.title, args, queuedAt: now }],
+    }))
 
   const route = { sessionId: d.session.sessionId, title: d.session.title }
   await patch($, hit.id, {
@@ -963,7 +1048,7 @@ async function handOff(
     waitingSince: await $.clock.now(),
     draftingSince: undefined,
     route,
-    note: isLate ? `${d.why ? `${d.why} · ` : ''}${LATE_NOTE}` : d.why,
+    note: [d.why, isLate ? LATE_NOTE : '', via !== undefined ? '由同权限模式的 session 代为转交' : ''].filter(Boolean).join(' · '),
   })
   // The conversation's later messages go to the same session.
   // Put last again, so the cap drops the routes longest unused, not the oldest still in use.
@@ -1519,6 +1604,7 @@ async function checkNow($: EngineInterface, isFull = true) {
 }
 
 async function tick($: EngineInterface) {
+  await registerMode($).catch(() => {})
   isLeader = await holdLease($)
   await $.state.set(POLL, { ...((await $.state.get(POLL)).value ?? { isPaused: false }), isLeader })
   const s = await readJson($, 'shared', EMPTY)
@@ -1761,6 +1847,7 @@ export const register: Register = on => {
     }
 
     $.clock.every(SYNC_MS, () => {
+      void processHandoffs($)
       void sync($)
       void processOutbox($)
     })

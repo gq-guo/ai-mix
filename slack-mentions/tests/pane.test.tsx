@@ -1271,3 +1271,100 @@ test('cards pushed off the end of the list are set aside, not found new again ev
   expect(JSON.parse(disk.get('/handled.json') ?? '[]')).toHaveLength(10)
   await ui.unmount()
 })
+
+// A session's start, with the clock, the folder and the hooks a poll needs.
+const polling = ($: never, on: never, files: Record<string, string>) => {
+  const o = on as (name: string, fn: (...a: never[]) => unknown) => void
+  const clock = mock.clock(on, { now: 1792650000000 })
+  mock.env(on, { HOME: '/h' })
+  const disk = fakeDisk(on, files)
+  o('fs.list', () => ({ value: [] }))
+  o('command.register', () => ({ value: { command: 'slack-mentions' } }))
+  o('tool.register', () => ({ value: { tool: 'mcp__slack-mentions__answer' } }))
+  o('ui.panes', () => ({ value: [] }))
+  o('ui.status', () => ({ value: undefined }))
+  o('ui.notify', () => ({ value: undefined }))
+  o('ui.toast', () => ({ value: undefined }))
+  o('tool.list', () => ({ value: SLACK_AND_SESSIONS }))
+  o('session.start', (_: never, e: { cwd: string }) => ({ cwd: e.cwd }))
+
+  return { clock, disk }
+}
+const ROOT = '/h/.claude/slack-mentions'
+const MODES = (at: number) =>
+  JSON.stringify({ local_169: { mode: 'default', at }, local_peer: { mode: 'default', at }, local_auto2: { mode: 'auto', at } })
+
+test('a task for a session in another permission mode is left for a session of that mode to send', async ($, on) => {
+  const { clock, disk } = polling($ as never, on as never, {
+    [`${ROOT}/shared.json`]: JSON.stringify({ items: [], isPaused: false, isAutoOpened: true }),
+    [`${ROOT}/modes.json`]: MODES(1792650000000),
+  })
+  const handed: Record<string, unknown>[] = []
+  on('mcp.call', (_, e) => {
+    if (e.tool === 'slack_read_user_profile') return { value: MY_PROFILE } as never
+    if (e.tool === 'list_sessions')
+      return { value: text(JSON.stringify([{ sessionId: 'local_169', title: '#169 周报', cwd: '/w/y' }])) } as never
+    if (e.tool === 'get_session')
+      return { value: text(JSON.stringify({ sessionId: 'local_me', title: '#207 轮询的', permissionMode: 'auto' })) } as never
+    if (e.tool === 'send_message') {
+      handed.push(e.args)
+
+      return { value: text('delivered') } as never
+    }
+    if (e.tool === 'slack_search_public_and_private')
+      return {
+        value: byAuthor(e, hit(1, 'notes', 'ME000001', '1792649990.000001', '<@U0ME000001> #169 把周报发一下'), '## Messages (0 results)\n'),
+      } as never
+
+    return { value: text('[]') } as never
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (let i = 0; i < 25; i++) await clock.advance(1_000)
+
+  // Not sent from here, where the app would hold it: it waits for the session in #169's own mode.
+  expect(handed).toHaveLength(0)
+  const s = JSON.parse(disk.get(`${ROOT}/shared.json`) ?? '{}')
+  expect(s.handoffs).toHaveLength(1)
+  expect(s.handoffs[0].via).toBe('local_peer')
+  expect(s.handoffs[0].args.session_id).toBe('local_169')
+  expect(s.items[0].status).toBe('waiting')
+  expect(s.items[0].route.sessionId).toBe('local_169')
+  expect(JSON.parse(disk.get(`${ROOT}/modes.json`) ?? '{}').local_me.mode).toBe('auto')
+
+  // Nobody took it: the poller sends it itself after all, once.
+  for (let i = 0; i < 40; i++) await clock.advance(1_000)
+  expect(handed).toHaveLength(1)
+  expect(JSON.parse(disk.get(`${ROOT}/shared.json`) ?? '{}').handoffs).toHaveLength(0)
+})
+
+test('the session a hand-over was left for sends it, and no other does', async ($, on) => {
+  const waiting = { ...mention('a', 'waiting'), isMine: true, route: { sessionId: 'local_169', title: '#169 周报' } }
+  const left = (via: string) => ({ id: `x:${via}`, itemId: 'a', via, title: '#169 周报', args: { session_id: 'local_169', message: `经 ${via}` }, queuedAt: 1792650000000 })
+  const { clock, disk } = polling($ as never, on as never, {
+    [`${ROOT}/shared.json`]: JSON.stringify({ items: [waiting], isPaused: true, isAutoOpened: true, handoffs: [left('local_peer'), left('local_else')] }),
+    [`${ROOT}/lease.json`]: JSON.stringify({ owner: 'other', until: 1792650000000 + 3_600_000, version: '999.0.0' }),
+  })
+  const handed: Record<string, unknown>[] = []
+  on('mcp.call', (_, e) => {
+    if (e.tool === 'get_session')
+      return { value: text(JSON.stringify({ sessionId: 'local_peer', title: '#12 同模式的', permissionMode: 'default' })) } as never
+    if (e.tool === 'send_message') {
+      handed.push(e.args)
+
+      return { value: { ...text('session is archived'), isError: true } } as never
+    }
+
+    return { value: text('[]') } as never
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (let i = 0; i < 20; i++) await clock.advance(1_000)
+
+  expect(handed).toEqual([{ session_id: 'local_169', message: '经 local_peer' }])
+  const s = JSON.parse(disk.get(`${ROOT}/shared.json`) ?? '{}')
+  expect(s.handoffs.map((h: { via: string }) => h.via)).toEqual(['local_else'])
+  // It could not be given: the card says why, word for word, and waits for a press.
+  expect(s.items[0].status).toBe('new')
+  expect(s.items[0].note).toContain('session is archived')
+})
