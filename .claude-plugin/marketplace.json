@@ -6,7 +6,7 @@
     {
       "name": "slack-mentions",
       "source": "./slack-mentions",
-      "description": "侧边面板处理 Slack 上 @ 你的消息和私聊：自动拟稿、点击发送、搜索人或频道发新消息"
+      "description": "侧边面板处理 Slack 上 @ 你的消息和私聊：自动拟稿、交给会话、可选的知识库自动回复、发新消息"
     }
   ]
 }
