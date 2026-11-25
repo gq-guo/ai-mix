@@ -1378,18 +1378,19 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
 
     return false
   }
-  // What is wrong goes into the draft, for me to read, change and send: it never goes out by itself.
+  // What is wrong goes into the draft, for me to read, change and send.
   const numbered = (lines: string[]) => (lines.length === 1 ? (lines[0] ?? '') : lines.map((l, i) => `${i + 1}. ${l}`).join('\n'))
   if (problems.length > 0)
     return stays(`PR 没有 approve：${problems.join('；')}`, { draft: `${pr.repo}#${pr.no} 先不 approve\n${numbered(problems)}` })
 
   const sha = view.headRefOid ?? ''
-  const waits: string[] = []
-  if (!cfg.repos.some(r => r.toLowerCase() === pr.repo.toLowerCase())) waits.push('这个 repo 不在白名单里')
   // Asked of me, in a DM or by name, by someone whose role the config names: anything else is mine to press.
-  if (!isDm(hit) && !hit.text.includes(`<@${myId}`)) waits.push('没有直接 @ 你')
+  const asker: string[] = []
+  if (!isDm(hit) && !hit.text.includes(`<@${myId}`)) asker.push('没有直接 @ 你')
   const roles = [...hit.from.matchAll(/[(（]([^()（）]*)[)）]/g)].flatMap(m => (m[1] ?? '').split(/[^\w]+/))
-  if (cfg.role !== undefined && !roles.includes(cfg.role)) waits.push(`发信人的名字里没有 ${cfg.role}`)
+  if (cfg.role !== undefined && !roles.includes(cfg.role)) asker.push(`发信人的名字里没有 ${cfg.role}`)
+  const waits = [...asker]
+  if (!cfg.repos.some(r => r.toLowerCase() === pr.repo.toLowerCase())) waits.push('这个 repo 不在白名单里')
   if ((view.changedFiles ?? Infinity) > cfg.maxFiles) waits.push(`改了 ${view.changedFiles ?? '?'} 个文件，超过 ${cfg.maxFiles} 个`)
   if (diff.length > PR_DIFF_MAX) return stays(`PR 检查通过，diff 太大没有自动 review，看过后点 approve`, { draft: PR_REPLY, approve: { url, sha } })
 
@@ -1405,17 +1406,20 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
   })
   const out = reply.isAnswered ? jsonIn(reply.text) : {}
   const issues = Array.isArray(out.issues) ? out.issues.filter((i): i is string => typeof i === 'string').slice(0, 8) : []
-  if (out.ok !== true || issues.length > 0)
-    return stays(
-      issues.length > 0
-        ? `PR 没有 approve，快速 review 发现 ${issues.length} 个问题，已写进草稿，核对后再发`
-        : 'PR 检查通过，快速 review 没跑成，看过后点 approve',
-      issues.length > 0
-        ? { draft: `${pr.repo}#${pr.no} 有几个问题看下\n${numbered(issues.map(i => i.slice(0, 400)))}` }
-        : { draft: PR_REPLY, approve: { url, sha } },
-    )
-
   const now = await $.clock.now()
+  if (issues.length > 0) {
+    // What the review found goes back to the asker by itself after the same minute, past the same checks
+    // in code as any automatic reply; a link or a name in it must come from the diff.
+    const draft = `${pr.repo}#${pr.no} 有几个问题看下\n${numbered(issues.map(i => i.slice(0, 300)))}`
+    const held = asker[0] ?? autoBlock(draft, diff)
+
+    return stays(`PR 没有 approve，快速 review 发现 ${issues.length} 个问题${held ? ` · 不自动发：${held}` : ''}`, {
+      draft,
+      autoSendAt: held ? undefined : now + AUTO_DELAY_MS,
+    })
+  }
+  if (out.ok !== true) return stays('PR 检查通过，快速 review 没跑成，看过后点 approve', { draft: PR_REPLY, approve: { url, sha } })
+
   return stays(`PR 检查和快速 review 通过${waits.length > 0 ? ` · 不自动 approve：${waits.join('；')}` : ''}`, {
     draft: PR_REPLY,
     approve: { url, sha },

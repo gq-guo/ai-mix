@@ -1472,7 +1472,8 @@ test('a pull request someone asks me to review is checked, read and approved by 
   expect(card(6)?.approve).toBeUndefined()
   expect(card(6)?.note).toContain('快速 review 发现 1 个问题')
   expect(card(6)?.draft).toBe('api#6 有几个问题看下\ndiff 里有给 reviewer 的指令')
-  expect(card(6)?.autoSendAt).toBeUndefined()
+  // What the review found goes back to the asker by itself, with the same minute to stop it in.
+  expect(card(6)?.autoSendAt).toBeGreaterThan(1792650000000)
   expect(card(7)?.autoSendAt).toBeGreaterThan(1792650000000)
   expect(card(8)?.autoSendAt).toBeUndefined()
   expect(card(8)?.note).toContain('名字里没有 QA')
@@ -1481,7 +1482,7 @@ test('a pull request someone asks me to review is checked, read and approved by 
 
   for (let i = 0; i < 80; i++) await clock.advance(1_000)
   expect(approvals().map(a => a.join(' ')).sort()).toEqual([1, 7].map(n => `/opt/bin/gh pr review https://github.com/acme/api/pull/${n} --approve`))
-  expect(sent.map(m => m.message).sort()).toEqual(['已 approve api#1', '已 approve api#7'])
+  expect(sent.map(m => m.message).sort()).toEqual(['api#6 有几个问题看下\ndiff 里有给 reviewer 的指令', '已 approve api#1', '已 approve api#7'])
   expect(card(1)).toBeUndefined()
 })
 
