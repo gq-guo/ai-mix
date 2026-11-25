@@ -147,8 +147,8 @@ Agent 会按下面「安装步骤」执行。
 
 1. 用 `gh` 检查（代码判断，不经过模型）：PR 是 open、不是 draft，机器人 review 过，没有人 request changes，没有未解决的 review 问题，CI 没有失败项。有一项不满足就只出卡片写明原因，不 approve。
 2. 把 `gh pr diff` 交给不带工具的模型快速 review。不 clone，不执行 PR 里的代码。发现问题就只出卡片列出问题，不 approve。
-3. 都通过、消息直接 @ 了你、发信人符合 `role`、仓库在 `repos` 里、改动文件数不超过 `maxFiles`：卡片显示倒计时，60 秒后自动 approve 并回一句「已 approve repo#编号」，期间可以点「取消自动发送」。
-4. 都通过但没有直接 @ 你、发信人不符合 `role`、仓库不在名单里、改动文件太多，或 diff 太大没法自动 review：卡片上出「approve 并通知」，你点了才执行。
+3. 都通过、是私聊或在频道里直接 @ 了你、发信人符合 `role`、仓库在 `repos` 里、改动文件数不超过 `maxFiles`：卡片显示倒计时，60 秒后自动 approve 并回一句「已 approve repo#编号」，期间可以点「取消自动发送」。
+4. 都通过但在频道里没有直接 @ 你、发信人不符合 `role`、仓库不在名单里、改动文件太多，或 diff 太大没法自动 review：卡片上出「approve 并通知」，你点了才执行。
 
 approve 前会再确认 PR 仍是 open、最新提交和检查时是同一个，变了就不 approve。approve 以你本机 `gh` 登录的账号进行。私聊里连发几个 PR 链接时每个各出一张卡片；你在它们之后回过消息的，视为你已经处理。
 

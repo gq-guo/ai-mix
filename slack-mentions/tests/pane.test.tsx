@@ -1433,7 +1433,7 @@ test('a pull request someone asks me to review is checked, read and approved by 
             ? [['api', 1], ['api', 2], ['web', 3], ['api', 4], ['api', 5], ['api', 6], ['api', 7], ['api', 8]]
                 .map(
                   ([repo, n], i) =>
-                    // #7 does not name me; #8 comes from someone whose name carries no QA.
+                    // #7 does not name me, which a DM need not; #8 comes from someone whose name carries no QA.
                     `### Result ${i + 1} of 8\nChannel: DM (ID: D0CAROL)\nFrom: Carol Wu (ENG - ${n === 8 ? 'QAT' : 'QA'}) (ID: U0CAROL)\nTime: t\nMessage_ts: 179264900${n}.000001\n` +
                     `Permalink: [link](https://example.slack.com/archives/D0CAROL/p${n})\nText: \n${n === 7 ? '' : '<@U0ME000001> '}&gt; <https://github.com/acme/${repo}/pull/${n}>\n\n---\n\n`,
                 )
@@ -1468,17 +1468,15 @@ test('a pull request someone asks me to review is checked, read and approved by 
   expect(card(5)?.note).toContain('review-bot 还没 review')
   expect(card(6)?.approve).toBeUndefined()
   expect(card(6)?.note).toContain('快速 review 发现')
-  expect(card(7)?.autoSendAt).toBeUndefined()
-  expect(card(7)?.approve?.url).toBe('https://github.com/acme/api/pull/7')
-  expect(card(7)?.note).toContain('没有直接 @ 你')
+  expect(card(7)?.autoSendAt).toBeGreaterThan(1792650000000)
   expect(card(8)?.autoSendAt).toBeUndefined()
   expect(card(8)?.note).toContain('名字里没有 QA')
   const approvals = () => ran.filter(a => a[2] === 'review')
   expect(approvals()).toHaveLength(0)
 
   for (let i = 0; i < 80; i++) await clock.advance(1_000)
-  expect(approvals()).toEqual([['/opt/bin/gh', 'pr', 'review', 'https://github.com/acme/api/pull/1', '--approve']])
-  expect(sent).toEqual([{ channel_id: 'D0CAROL', message: '已 approve api#1' }])
+  expect(approvals().map(a => a.join(' ')).sort()).toEqual([1, 7].map(n => `/opt/bin/gh pr review https://github.com/acme/api/pull/${n} --approve`))
+  expect(sent.map(m => m.message).sort()).toEqual(['已 approve api#1', '已 approve api#7'])
   expect(card(1)).toBeUndefined()
 })
 

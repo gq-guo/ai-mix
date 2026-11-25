@@ -1,6 +1,6 @@
 {
   "name": "slack-mentions",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Side pane for Slack @-mentions and DMs: checks when Slack notifies (every 10s where it cannot tell), hands a message to the session already on its task, answers from a knowledge base folder and the folders mounted beside it by itself after a minute, drafts the rest for your click, runs a message you wrote that names you as a task in a session, and writes new messages to people or channels",
   "types": "./types/index.d.ts"
 }
