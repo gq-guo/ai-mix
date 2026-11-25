@@ -1378,7 +1378,10 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
 
     return false
   }
-  if (problems.length > 0) return stays(`PR 没有 approve：${problems.join('；')}`)
+  // What is wrong goes into the draft, for me to read, change and send: it never goes out by itself.
+  const numbered = (lines: string[]) => (lines.length === 1 ? (lines[0] ?? '') : lines.map((l, i) => `${i + 1}. ${l}`).join('\n'))
+  if (problems.length > 0)
+    return stays(`PR 没有 approve：${problems.join('；')}`, { draft: `${pr.repo}#${pr.no} 先不 approve\n${numbered(problems)}` })
 
   const sha = view.headRefOid ?? ''
   const waits: string[] = []
@@ -1405,9 +1408,11 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
   if (out.ok !== true || issues.length > 0)
     return stays(
       issues.length > 0
-        ? `PR 没有 approve，快速 review 发现：${issues.map(i => i.slice(0, 160)).join('；')}`
+        ? `PR 没有 approve，快速 review 发现 ${issues.length} 个问题，已写进草稿，核对后再发`
         : 'PR 检查通过，快速 review 没跑成，看过后点 approve',
-      issues.length > 0 ? {} : { draft: PR_REPLY, approve: { url, sha } },
+      issues.length > 0
+        ? { draft: `${pr.repo}#${pr.no} 有几个问题看下\n${numbered(issues.map(i => i.slice(0, 400)))}` }
+        : { draft: PR_REPLY, approve: { url, sha } },
     )
 
   const now = await $.clock.now()
