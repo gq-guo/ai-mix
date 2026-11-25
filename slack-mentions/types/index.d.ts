@@ -1,13 +1,8 @@
 // `new`: no draft yet and none started, which is how a channel-wide message arrives.
-export type MentionStatus = 'new' | 'drafting' | 'ready' | 'sending' | 'sent' | 'error'
+// `waiting`: handed to a session that works on the same task; its answer comes back as the draft.
+export type MentionStatus = 'new' | 'drafting' | 'waiting' | 'ready' | 'sending' | 'sent' | 'error'
 
 export type Person = { id: string; name: string }
-
-// What the analysis suggests doing with a message; nothing runs until the person presses it.
-export type Suggestion =
-  | { kind: 'session'; sessionId: string; title: string; reason: string }
-  | { kind: 'new'; title: string; reason: string }
-  | { kind: 'none'; reason: string }
 
 export type Mention = {
   id: string
@@ -16,11 +11,27 @@ export type Mention = {
   people?: Person[]
   // Reached you through @here / @channel / @everyone rather than by name.
   isBroadcast?: boolean
+  // Written by me and naming me: a task of mine to run, not a message to answer.
+  isMine?: boolean
   // Sent by a bot or app: shown only when it names me, and drafted only on request.
   isBot?: boolean
-  suggestion?: Suggestion
-  // What the person had done with it: `已转给 …` or `已请求新开会话`.
-  dispatched?: string
+  // Its search listing held a planted result block: the sender and channel are not certain.
+  isSuspect?: boolean
+  // Pressed 发送 in a session auto mode blocks: waiting for another session to send it.
+  relaying?: boolean
+  // The session the message was handed to (no id: one the person was asked to start), and since when.
+  route?: { sessionId: string; title: string }
+  waitingSince?: number
+  // What that session answered: the facts the draft is written from.
+  facts?: string
+  // Where the draft came from, or what the card suggests, in a line.
+  note?: string
+  // Wants looking into and no session has it: the card offers to start one.
+  wantsSession?: boolean
+  // The knowledge base files the draft was written from.
+  sources?: string[]
+  // Written from the knowledge base alone and past every check: sent at this time unless stopped.
+  autoSendAt?: number
   channelId: string
   channelName: string
   from: string
@@ -35,7 +46,7 @@ export type Mention = {
   draftingSince?: number
 }
 
-export type PollInfo = { lastCheck?: string; error?: string; isPaused: boolean; isLeader: boolean }
+export type PollInfo = { lastCheck?: string; error?: string; notice?: string; isPaused: boolean; isLeader: boolean; isByNotice?: boolean }
 
 export type Target = { kind: 'user' | 'channel'; id: string; name: string }
 
