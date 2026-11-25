@@ -30,6 +30,9 @@ export type Mention = {
   wantsSession?: boolean
   // The knowledge base files the draft was written from.
   sources?: string[]
+  // The pull request the message asks a review of, checked and read: sending the reply approves it first,
+  // as long as its head is still this commit.
+  approve?: { url: string; sha: string }
   // Written from the knowledge base alone and past every check: sent at this time unless stopped.
   autoSendAt?: number
   channelId: string

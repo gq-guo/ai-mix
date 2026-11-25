@@ -128,6 +128,32 @@ Agent 会按下面「安装步骤」执行。
 
 自动开会话需要你在 `~/.claude/settings.json` 的 `permissions.allow` 里放行桌面版开会话的工具（名字形如 `mcp__<server>__start_session`），不放行就只出卡片。
 
+## PR review 请求：自动检查、review、approve（可选）
+
+默认关闭。写了 `~/.claude/slack-mentions/pr-review.json` 才生效：
+
+```json
+{ "org": "your-org", "bot": "your-review-bot", "repos": ["repo-a", "repo-b"], "maxFiles": 10, "role": "QA", "gh": "/opt/homebrew/bin/gh" }
+```
+
+- `org`：只处理这个 GitHub 组织下的 PR
+- `bot`：必须已经 review 过这个 PR 的 review 机器人账号
+- `repos`：可以不经点击自动 approve 的仓库；不在里面的要你点
+- `maxFiles`（可选，默认 10）：改动文件数超过它的要你点
+- `role`（可选）：发信人 Slack 名字的括号里要有这个词（如 `Ann Lee (ENG - QA)`）才自动 approve，否则要你点。名字是对方自己在 Slack 里设的，不是身份校验
+- `gh`（可选）：GitHub CLI 的绝对路径，会话的 PATH 里没有 `gh` 时填；需要先 `gh auth login`
+
+别人私聊或 @ 你的消息里正好有一个该组织的 PR 链接时：
+
+1. 用 `gh` 检查（代码判断，不经过模型）：PR 是 open、不是 draft，机器人 review 过，没有人 request changes，没有未解决的 review 问题，CI 没有失败项。有一项不满足就只出卡片写明原因，不 approve。
+2. 把 `gh pr diff` 交给不带工具的模型快速 review。不 clone，不执行 PR 里的代码。发现问题就只出卡片列出问题，不 approve。
+3. 都通过、是私聊或在频道里直接 @ 了你、发信人符合 `role`、仓库在 `repos` 里、改动文件数不超过 `maxFiles`：卡片显示倒计时，60 秒后自动 approve 并回一句「已 approve repo#编号」，期间可以点「取消自动发送」。
+4. 都通过但在频道里没有直接 @ 你、发信人不符合 `role`、仓库不在名单里、改动文件太多，或 diff 太大没法自动 review：卡片上出「approve 并通知」，你点了才执行。
+
+approve 前会再确认 PR 仍是 open、最新提交和检查时是同一个，变了就不 approve。approve 以你本机 `gh` 登录的账号进行。私聊里连发几个 PR 链接时每个各出一张卡片；你在它们之后回过消息的，视为你已经处理。
+
+注意：PR 的标题、描述和 diff 都是别人写的内容，模型的快速 review 可能漏掉问题，也可能被里面的文字误导。自动 approve 挂的是你的名字，介意的话把 `repos` 留空，全部改成点击。
+
 ## 自动模式下发送被拦
 
 发消息的工具 `slack_send_message` 不在放行规则里，自动模式的会话里每次发送都要过权限检查。检查没给出结论时插件会自动再试一次；还被拦的话，会交给另一个不在自动模式的会话代发，2 分钟内没有会话能发就在卡片上提示。不建议把发送工具加进放行规则：那样 Claude 在自动模式里就能不经你确认直接发 Slack 消息。
@@ -138,7 +164,7 @@ Agent 会按下面「安装步骤」执行。
 
 ## 数据
 
-- 待回复列表、已处理记录、交接记录（`routes.json`）、各会话的权限模式（`modes.json`）、取消过自动发送的卡片（`stopped.json`）、轮询锁、知识库挂载配置（`kb-roots.json`）都存在本机 `~/.claude/slack-mentions/`，不会上传到别处
+- 待回复列表、已处理记录、交接记录（`routes.json`）、各会话的权限模式（`modes.json`）、取消过自动发送的卡片（`stopped.json`）、轮询锁、知识库挂载配置（`kb-roots.json`）、PR review 配置（`pr-review.json`）都存在本机 `~/.claude/slack-mentions/`，不会上传到别处
 - 自动回复记录 `auto-log.json` 里有对方的原话、发信人和发出的回复，最多留最近若干条，不想留可以直接删这个文件
 - 读 Slack、发消息都通过你自己在 claude.ai 连接的 Slack 连接器，以你的身份进行
 - 拟稿和分流时会把消息、最近的对话记录，以及用到的知识库文件发给 Claude 模型（Sonnet）
