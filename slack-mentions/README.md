@@ -133,21 +133,22 @@ Agent 会按下面「安装步骤」执行。
 默认关闭。写了 `~/.claude/slack-mentions/pr-review.json` 才生效：
 
 ```json
-{ "org": "your-org", "bot": "your-review-bot", "repos": ["repo-a", "repo-b"], "maxFiles": 10, "gh": "/opt/homebrew/bin/gh" }
+{ "org": "your-org", "bot": "your-review-bot", "repos": ["repo-a", "repo-b"], "maxFiles": 10, "role": "QA", "gh": "/opt/homebrew/bin/gh" }
 ```
 
 - `org`：只处理这个 GitHub 组织下的 PR
 - `bot`：必须已经 review 过这个 PR 的 review 机器人账号
 - `repos`：可以不经点击自动 approve 的仓库；不在里面的要你点
 - `maxFiles`（可选，默认 10）：改动文件数超过它的要你点
+- `role`（可选）：发信人 Slack 名字的括号里要有这个词（如 `Ann Lee (ENG - QA)`）才自动 approve，否则要你点。名字是对方自己在 Slack 里设的，不是身份校验
 - `gh`（可选）：GitHub CLI 的绝对路径，会话的 PATH 里没有 `gh` 时填；需要先 `gh auth login`
 
 别人私聊或 @ 你的消息里正好有一个该组织的 PR 链接时：
 
 1. 用 `gh` 检查（代码判断，不经过模型）：PR 是 open、不是 draft，机器人 review 过，没有人 request changes，没有未解决的 review 问题，CI 没有失败项。有一项不满足就只出卡片写明原因，不 approve。
 2. 把 `gh pr diff` 交给不带工具的模型快速 review。不 clone，不执行 PR 里的代码。发现问题就只出卡片列出问题，不 approve。
-3. 都通过、仓库在 `repos` 里、改动文件数不超过 `maxFiles`：卡片显示倒计时，60 秒后自动 approve 并回一句「已 approve repo#编号」，期间可以点「取消自动发送」。
-4. 都通过但仓库不在名单里、改动文件太多，或 diff 太大没法自动 review：卡片上出「approve 并通知」，你点了才执行。
+3. 都通过、消息直接 @ 了你、发信人符合 `role`、仓库在 `repos` 里、改动文件数不超过 `maxFiles`：卡片显示倒计时，60 秒后自动 approve 并回一句「已 approve repo#编号」，期间可以点「取消自动发送」。
+4. 都通过但没有直接 @ 你、发信人不符合 `role`、仓库不在名单里、改动文件太多，或 diff 太大没法自动 review：卡片上出「approve 并通知」，你点了才执行。
 
 approve 前会再确认 PR 仍是 open、最新提交和检查时是同一个，变了就不 approve。approve 以你本机 `gh` 登录的账号进行。私聊里连发几个 PR 链接时每个各出一张卡片；你在它们之后回过消息的，视为你已经处理。
 

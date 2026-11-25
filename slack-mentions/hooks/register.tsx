@@ -1272,7 +1272,8 @@ async function runOwn($: EngineInterface, hit: Hit) {
 // Pull requests someone asks me to review. pr-review.json turns it on: `{ org, bot, repos, maxFiles?, gh? }`,
 // the GitHub organization whose pull requests count, the review bot that must have been over it, the
 // repositories whose pull requests may be approved without a press, and how many changed files that holds for.
-type PrConfig = { org: string; bot: string; repos: string[]; maxFiles: number; gh: string }
+// `role`: a word the asker's Slack name must carry in its brackets (`Ann Lee (ENG - QA)`) for an approval without a press.
+type PrConfig = { org: string; bot: string; repos: string[]; maxFiles: number; gh: string; role?: string }
 const PR_NAME_RE = /^[\w.-]{1,100}$/
 const PR_LINK_RE = /https:\/\/github\.com\/([\w.-]{1,100})\/([\w.-]{1,100})\/pull\/(\d{1,9})(?![\w-])/g
 const PR_DIFF_MAX = 60_000
@@ -1293,6 +1294,7 @@ async function readPrConfig($: EngineInterface): Promise<PrConfig | undefined> {
     maxFiles: typeof c.maxFiles === 'number' && c.maxFiles > 0 ? c.maxFiles : 10,
     // An absolute path, for a session whose PATH has no gh.
     gh: typeof c.gh === 'string' && /^\/[\w./-]+$/.test(c.gh) ? c.gh : 'gh',
+    role: typeof c.role === 'string' && /^\w{1,30}$/.test(c.role) ? c.role : undefined,
   }
 }
 
@@ -1381,6 +1383,10 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
   const sha = view.headRefOid ?? ''
   const waits: string[] = []
   if (!cfg.repos.some(r => r.toLowerCase() === pr.repo.toLowerCase())) waits.push('这个 repo 不在白名单里')
+  // Asked of me by name, by someone whose role the config names: anything else is mine to press.
+  if (!hit.text.includes(`<@${myId}`)) waits.push('没有直接 @ 你')
+  const roles = [...hit.from.matchAll(/[(（]([^()（）]*)[)）]/g)].flatMap(m => (m[1] ?? '').split(/[^\w]+/))
+  if (cfg.role !== undefined && !roles.includes(cfg.role)) waits.push(`发信人的名字里没有 ${cfg.role}`)
   if ((view.changedFiles ?? Infinity) > cfg.maxFiles) waits.push(`改了 ${view.changedFiles ?? '?'} 个文件，超过 ${cfg.maxFiles} 个`)
   if (diff.length > PR_DIFF_MAX) return stays(`PR 检查通过，diff 太大没有自动 review，看过后点 approve`, { draft: PR_REPLY, approve: { url, sha } })
 
