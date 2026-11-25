@@ -1380,15 +1380,24 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
   }
   // What is wrong goes into the draft, for me to read, change and send.
   const numbered = (lines: string[]) => (lines.length === 1 ? (lines[0] ?? '') : lines.map((l, i) => `${i + 1}. ${l}`).join('\n'))
-  if (problems.length > 0)
-    return stays(`PR 没有 approve：${problems.join('；')}`, { draft: `${pr.repo}#${pr.no} 先不 approve\n${numbered(problems)}` })
-
-  const sha = view.headRefOid ?? ''
   // Asked of me, in a DM or by name, by someone whose role the config names: anything else is mine to press.
   const asker: string[] = []
   if (!isDm(hit) && !hit.text.includes(`<@${myId}`)) asker.push('没有直接 @ 你')
   const roles = [...hit.from.matchAll(/[(（]([^()（）]*)[)）]/g)].flatMap(m => (m[1] ?? '').split(/[^\w]+/))
   if (cfg.role !== undefined && !roles.includes(cfg.role)) asker.push(`发信人的名字里没有 ${cfg.role}`)
+  if (problems.length > 0) {
+    // Why it is not approved goes back to the asker by itself too, after the same minute. A pull request
+    // already merged or closed is not news to them: that one waits for me.
+    const draft = `${pr.repo}#${pr.no} 先不 approve\n${numbered(problems)}`
+    const held = (view.state !== 'OPEN' ? 'PR 已经不是 open' : undefined) ?? asker[0] ?? autoBlock(draft, draft)
+
+    return stays(`PR 没有 approve：${problems.join('；')}${held ? ` · 不自动发：${held}` : ''}`, {
+      draft,
+      autoSendAt: held ? undefined : (await $.clock.now()) + AUTO_DELAY_MS,
+    })
+  }
+
+  const sha = view.headRefOid ?? ''
   const waits = [...asker]
   if (!cfg.repos.some(r => r.toLowerCase() === pr.repo.toLowerCase())) waits.push('这个 repo 不在白名单里')
   if ((view.changedFiles ?? Infinity) > cfg.maxFiles) waits.push(`改了 ${view.changedFiles ?? '?'} 个文件，超过 ${cfg.maxFiles} 个`)
