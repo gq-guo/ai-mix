@@ -1523,3 +1523,25 @@ test('a pull request that moved on after it was checked is not approved', async 
   expect(card.status).toBe('error')
   expect(card.error).toContain('有了新提交')
 })
+
+test('a list file cut short mid-write is set aside and the poll goes on', async ($, on) => {
+  const cut = '{\n "items": [],\n "isPaused": false,\n "error": "没有找到\u0000\u0000\u0000'
+  const { clock, disk } = polling($ as never, on as never, { [`${ROOT}/shared.json`]: cut })
+  let searches = 0
+  on('mcp.call', (_, e) => {
+    if (e.tool === 'slack_read_user_profile') return { value: MY_PROFILE } as never
+    if (e.tool === 'slack_search_public_and_private') searches += 1
+
+    return { value: wrapped('## Messages (0 results)\n') } as never
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // One bad read may be a write in progress: nothing is thrown away yet.
+  for (let i = 0; i < 15; i++) await clock.advance(1_000)
+  expect(disk.get(`${ROOT}/shared.json`)).toBe(cut)
+
+  for (let i = 0; i < 40; i++) await clock.advance(1_000)
+  expect(disk.get(`${ROOT}/shared.bad.json`)).toBe(cut)
+  expect(JSON.parse(disk.get(`${ROOT}/shared.json`) ?? '').items).toEqual([])
+  expect(searches).toBeGreaterThan(0)
+})

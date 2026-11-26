@@ -1798,7 +1798,30 @@ async function checkNow($: EngineInterface, isFull = true) {
   }
 }
 
+let badReads = 0
+
+// A write cut short (the machine slept or the app quit mid-write) leaves a list no session can read, and
+// every round would stop at it for good. One caught mid-write reads well the next round; one still unreadable
+// after three is set aside as shared.bad.json and the list starts empty: what is still owed an answer is
+// found again by the next check.
+async function healShared($: EngineInterface) {
+  if (!(await $.fs.exists(file('shared')))) return
+  const text = await $.fs.read(file('shared'))
+  try {
+    JSON.parse(text)
+    badReads = 0
+  } catch {
+    badReads += 1
+    if (badReads < 3) return
+    badReads = 0
+    await $.fs.write(file('shared.bad'), text)
+    await writeJson($, 'shared', { ...EMPTY, isAutoOpened: true })
+    $.ui.toast('待回复列表文件损坏，已另存为 shared.bad.json 并重新开始')
+  }
+}
+
 async function tick($: EngineInterface) {
+  await healShared($).catch(() => {})
   await registerMode($).catch(() => {})
   isLeader = await holdLease($)
   await $.state.set(POLL, { ...((await $.state.get(POLL)).value ?? { isPaused: false }), isLeader })
@@ -2046,7 +2069,8 @@ export const register: Register = on => {
       })
       .catch(() => {})
 
-    const s = await readJson($, 'shared', EMPTY).catch(() => EMPTY)
+    // A list that cannot be read is no first run: the session starts all the same, and the poll mends the file.
+    const s = await readJson($, 'shared', EMPTY).catch(() => ({ ...EMPTY, isAutoOpened: true }))
     await $.state.set(IS_OPEN, (await $.ui.panes()).some(pane => pane.id === PANE))
     if (!s.isAutoOpened) {
       void openPane($)
