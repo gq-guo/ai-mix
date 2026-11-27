@@ -1273,6 +1273,8 @@ async function runOwn($: EngineInterface, hit: Hit) {
 // the GitHub organization whose pull requests count, the review bot that must have been over it, the
 // repositories whose pull requests may be approved without a press, and how many changed files that holds for.
 // `role`: a word the asker's Slack name must carry in its brackets (`Ann Lee (ENG - QA)`) for an approval without a press.
+// Paths that hold unit tests: a tests folder, or a file named as a test in the usual ways.
+const TEST_FILE_RE = /(^|\/)(tests?|__tests__|specs?|testdata|__snapshots__)\/|(^|\/)test_[^/]*\.py$|[._-](test|spec)\.[a-z]+$|Tests?\.(java|kt|cs)$/
 type PrConfig = { org: string; bot: string; repos: string[]; maxFiles: number; gh: string; role?: string }
 const PR_NAME_RE = /^[\w.-]{1,100}$/
 const PR_LINK_RE = /https:\/\/github\.com\/([\w.-]{1,100})\/([\w.-]{1,100})\/pull\/(\d{1,9})(?![\w-])/g
@@ -1378,16 +1380,35 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
 
     return false
   }
-  if (problems.length > 0) return stays(`PR 没有 approve：${problems.join('；')}`)
+  // What is wrong goes into the draft, for me to read, change and send.
+  const numbered = (lines: string[]) => (lines.length === 1 ? (lines[0] ?? '') : lines.map((l, i) => `${i + 1}. ${l}`).join('\n'))
+  // Asked of me, in a DM or by name, by someone whose role the config names: anything else is mine to press.
+  const asker: string[] = []
+  if (!isDm(hit) && !hit.text.includes(`<@${myId}`)) asker.push('没有直接 @ 你')
+  const roles = [...hit.from.matchAll(/[(（]([^()（）]*)[)）]/g)].flatMap(m => (m[1] ?? '').split(/[^\w]+/))
+  if (cfg.role !== undefined && !roles.includes(cfg.role)) asker.push(`发信人的名字里没有 ${cfg.role}`)
+  if (problems.length > 0) {
+    // Why it is not approved goes back to the asker by itself too, after the same minute. A pull request
+    // already merged or closed is not news to them: that one waits for me.
+    const draft = `${pr.repo}#${pr.no} 先不 approve\n${numbered(problems)}`
+    const held = (view.state !== 'OPEN' ? 'PR 已经不是 open' : undefined) ?? asker[0] ?? autoBlock(draft, draft)
+
+    return stays(`PR 没有 approve：${problems.join('；')}${held ? ` · 不自动发：${held}` : ''}`, {
+      draft,
+      autoSendAt: held ? undefined : (await $.clock.now()) + AUTO_DELAY_MS,
+    })
+  }
 
   const sha = view.headRefOid ?? ''
-  const waits: string[] = []
+  const waits = [...asker]
   if (!cfg.repos.some(r => r.toLowerCase() === pr.repo.toLowerCase())) waits.push('这个 repo 不在白名单里')
-  // Asked of me, in a DM or by name, by someone whose role the config names: anything else is mine to press.
-  if (!isDm(hit) && !hit.text.includes(`<@${myId}`)) waits.push('没有直接 @ 你')
-  const roles = [...hit.from.matchAll(/[(（]([^()（）]*)[)）]/g)].flatMap(m => (m[1] ?? '').split(/[^\w]+/))
-  if (cfg.role !== undefined && !roles.includes(cfg.role)) waits.push(`发信人的名字里没有 ${cfg.role}`)
-  if ((view.changedFiles ?? Infinity) > cfg.maxFiles) waits.push(`改了 ${view.changedFiles ?? '?'} 个文件，超过 ${cfg.maxFiles} 个`)
+  // Unit tests are neither counted nor read. A pull request of tests alone is read whole, so nothing is approved unread.
+  const parts = diff.split(/^(?=diff --git )/m)
+  const code = parts.filter(p => !TEST_FILE_RE.test(/^diff --git a\/.* b\/(.*)$/m.exec(p)?.[1] ?? ''))
+  const tests = code.some(p => p.startsWith('diff --git ')) ? parts.length - code.length : 0
+  if (tests > 0) diff = code.join('')
+  const files = view.changedFiles === undefined ? undefined : view.changedFiles - tests
+  if ((files ?? Infinity) > cfg.maxFiles) waits.push(`改了 ${files ?? '?'} 个文件${tests > 0 ? '（不算单测）' : ''}，超过 ${cfg.maxFiles} 个`)
   if (diff.length > PR_DIFF_MAX) return stays(`PR 检查通过，diff 太大没有自动 review，看过后点 approve`, { draft: PR_REPLY, approve: { url, sha } })
 
   const reply = await $.model.complete({
@@ -1402,15 +1423,20 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
   })
   const out = reply.isAnswered ? jsonIn(reply.text) : {}
   const issues = Array.isArray(out.issues) ? out.issues.filter((i): i is string => typeof i === 'string').slice(0, 8) : []
-  if (out.ok !== true || issues.length > 0)
-    return stays(
-      issues.length > 0
-        ? `PR 没有 approve，快速 review 发现：${issues.map(i => i.slice(0, 160)).join('；')}`
-        : 'PR 检查通过，快速 review 没跑成，看过后点 approve',
-      issues.length > 0 ? {} : { draft: PR_REPLY, approve: { url, sha } },
-    )
-
   const now = await $.clock.now()
+  if (issues.length > 0) {
+    // What the review found goes back to the asker by itself after the same minute, past the same checks
+    // in code as any automatic reply; a link or a name in it must come from the diff.
+    const draft = `${pr.repo}#${pr.no} 有几个问题看下\n${numbered(issues.map(i => i.slice(0, 300)))}`
+    const held = asker[0] ?? autoBlock(draft, diff)
+
+    return stays(`PR 没有 approve，快速 review 发现 ${issues.length} 个问题${held ? ` · 不自动发：${held}` : ''}`, {
+      draft,
+      autoSendAt: held ? undefined : now + AUTO_DELAY_MS,
+    })
+  }
+  if (out.ok !== true) return stays('PR 检查通过，快速 review 没跑成，看过后点 approve', { draft: PR_REPLY, approve: { url, sha } })
+
   return stays(`PR 检查和快速 review 通过${waits.length > 0 ? ` · 不自动 approve：${waits.join('；')}` : ''}`, {
     draft: PR_REPLY,
     approve: { url, sha },
@@ -1780,7 +1806,30 @@ async function checkNow($: EngineInterface, isFull = true) {
   }
 }
 
+let badReads = 0
+
+// A write cut short (the machine slept or the app quit mid-write) leaves a list no session can read, and
+// every round would stop at it for good. One caught mid-write reads well the next round; one still unreadable
+// after three is set aside as shared.bad.json and the list starts empty: what is still owed an answer is
+// found again by the next check.
+async function healShared($: EngineInterface) {
+  if (!(await $.fs.exists(file('shared')))) return
+  const text = await $.fs.read(file('shared'))
+  try {
+    JSON.parse(text)
+    badReads = 0
+  } catch {
+    badReads += 1
+    if (badReads < 3) return
+    badReads = 0
+    await $.fs.write(file('shared.bad'), text)
+    await writeJson($, 'shared', { ...EMPTY, isAutoOpened: true })
+    $.ui.toast('待回复列表文件损坏，已另存为 shared.bad.json 并重新开始')
+  }
+}
+
 async function tick($: EngineInterface) {
+  await healShared($).catch(() => {})
   await registerMode($).catch(() => {})
   isLeader = await holdLease($)
   await $.state.set(POLL, { ...((await $.state.get(POLL)).value ?? { isPaused: false }), isLeader })
@@ -2028,7 +2077,8 @@ export const register: Register = on => {
       })
       .catch(() => {})
 
-    const s = await readJson($, 'shared', EMPTY).catch(() => EMPTY)
+    // A list that cannot be read is no first run: the session starts all the same, and the poll mends the file.
+    const s = await readJson($, 'shared', EMPTY).catch(() => ({ ...EMPTY, isAutoOpened: true }))
     await $.state.set(IS_OPEN, (await $.ui.panes()).some(pane => pane.id === PANE))
     if (!s.isAutoOpened) {
       void openPane($)
