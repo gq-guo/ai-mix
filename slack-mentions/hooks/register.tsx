@@ -1273,6 +1273,8 @@ async function runOwn($: EngineInterface, hit: Hit) {
 // the GitHub organization whose pull requests count, the review bot that must have been over it, the
 // repositories whose pull requests may be approved without a press, and how many changed files that holds for.
 // `role`: a word the asker's Slack name must carry in its brackets (`Ann Lee (ENG - QA)`) for an approval without a press.
+// Paths that hold unit tests: a tests folder, or a file named as a test in the usual ways.
+const TEST_FILE_RE = /(^|\/)(tests?|__tests__|specs?|testdata|__snapshots__)\/|(^|\/)test_[^/]*\.py$|[._-](test|spec)\.[a-z]+$|Tests?\.(java|kt|cs)$/
 type PrConfig = { org: string; bot: string; repos: string[]; maxFiles: number; gh: string; role?: string }
 const PR_NAME_RE = /^[\w.-]{1,100}$/
 const PR_LINK_RE = /https:\/\/github\.com\/([\w.-]{1,100})\/([\w.-]{1,100})\/pull\/(\d{1,9})(?![\w-])/g
@@ -1400,7 +1402,13 @@ async function reviewPr($: EngineInterface, hit: Hit): Promise<boolean> {
   const sha = view.headRefOid ?? ''
   const waits = [...asker]
   if (!cfg.repos.some(r => r.toLowerCase() === pr.repo.toLowerCase())) waits.push('这个 repo 不在白名单里')
-  if ((view.changedFiles ?? Infinity) > cfg.maxFiles) waits.push(`改了 ${view.changedFiles ?? '?'} 个文件，超过 ${cfg.maxFiles} 个`)
+  // Unit tests are neither counted nor read. A pull request of tests alone is read whole, so nothing is approved unread.
+  const parts = diff.split(/^(?=diff --git )/m)
+  const code = parts.filter(p => !TEST_FILE_RE.test(/^diff --git a\/.* b\/(.*)$/m.exec(p)?.[1] ?? ''))
+  const tests = code.some(p => p.startsWith('diff --git ')) ? parts.length - code.length : 0
+  if (tests > 0) diff = code.join('')
+  const files = view.changedFiles === undefined ? undefined : view.changedFiles - tests
+  if ((files ?? Infinity) > cfg.maxFiles) waits.push(`改了 ${files ?? '?'} 个文件${tests > 0 ? '（不算单测）' : ''}，超过 ${cfg.maxFiles} 个`)
   if (diff.length > PR_DIFF_MAX) return stays(`PR 检查通过，diff 太大没有自动 review，看过后点 approve`, { draft: PR_REPLY, approve: { url, sha } })
 
   const reply = await $.model.complete({

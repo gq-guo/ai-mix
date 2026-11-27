@@ -139,7 +139,7 @@ Agent 会按下面「安装步骤」执行。
 - `org`：只处理这个 GitHub 组织下的 PR
 - `bot`：必须已经 review 过这个 PR 的 review 机器人账号
 - `repos`：可以不经点击自动 approve 的仓库；不在里面的要你点
-- `maxFiles`（可选，默认 10）：改动文件数超过它的要你点
+- `maxFiles`（可选，默认 10）：改动文件数超过它的要你点。单测文件（`tests/`、`__tests__/` 等目录，`*.test.*`、`*.spec.*`、`*_test.*`、`test_*.py` 这类文件名）不计数，也不进自动 review；整个 PR 只有单测时照常全部计数和 review
 - `role`（可选）：发信人 Slack 名字的括号里要有这个词（如 `Ann Lee (ENG - QA)`）才自动 approve，否则要你点。名字是对方自己在 Slack 里设的，不是身份校验
 - `gh`（可选）：GitHub CLI 的绝对路径，会话的 PATH 里没有 `gh` 时填；需要先 `gh auth login`
 
